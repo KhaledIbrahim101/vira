@@ -1,0 +1,17 @@
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv ffmpeg build-essential git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements-gpu.txt ./
+RUN python3 -m pip install --no-cache-dir -U pip && \
+    python3 -m pip install --no-cache-dir -r requirements-gpu.txt
+
+COPY . .
+ENV PYTHONPATH=/app/libs/common:/app
+
+# Weights are NOT copied into image. Mount via volume, e.g.:
+#   - /path/to/wan2-weights:/models/wan2:ro

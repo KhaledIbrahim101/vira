@@ -1,0 +1,11 @@
+# GPU runtime dependencies for Wan backend
+-r requirements.txt
+torch>=2.3.0
+torchvision>=0.18.0
+diffusers>=0.31.0
+transformers>=4.44.0
+accelerate>=0.34.0
+safetensors>=0.4.5
+numpy>=1.26.0
+imageio>=2.35.1
+Pillow>=10.4.0

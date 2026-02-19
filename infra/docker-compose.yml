@@ -1,0 +1,93 @@
+version: '3.9'
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: vira
+    ports: ["5432:5432"]
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/vira
+      REDIS_URL: redis://redis:6379/0
+    depends_on: [postgres]
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: uvicorn services.api.main:app --host 0.0.0.0 --port 8000
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/vira
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: local
+      STORAGE_ROOT: /data/storage
+      MAX_CONCURRENT_JOBS: 4
+      SUBMISSION_RATE_LIMIT_PER_MINUTE: 30
+    volumes:
+      - storage_data:/data/storage
+    ports: ["8000:8000"]
+    depends_on: [postgres, redis, migrate]
+
+  director:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: celery -A common.celery_app.celery_app worker -Q director --concurrency=1 --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/vira
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: local
+      STORAGE_ROOT: /data/storage
+    volumes:
+      - storage_data:/data/storage
+    depends_on: [postgres, redis, migrate]
+
+  worker_gpu:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: celery -A common.celery_app.celery_app worker -Q gpu --concurrency=1 --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/vira
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: local
+      STORAGE_ROOT: /data/storage
+      MODEL_BACKEND: dummy
+      WAN_MODEL_PATH: /models/wan2
+      WAN_DEVICE: cuda
+      WAN_DTYPE: float16
+      WAN_VRAM_MODE: safe
+    volumes:
+      - storage_data:/data/storage
+    depends_on: [postgres, redis, migrate]
+
+  postprocess:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: celery -A common.celery_app.celery_app worker -Q postprocess --concurrency=1 --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/vira
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: local
+      STORAGE_ROOT: /data/storage
+    volumes:
+      - storage_data:/data/storage
+    depends_on: [postgres, redis, migrate]
+
+volumes:
+  pg_data:
+  storage_data:
