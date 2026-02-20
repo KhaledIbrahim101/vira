@@ -295,18 +295,29 @@ AWS_ENDPOINT_URL: https://storage.googleapis.com
 
 Remove or leave `STORAGE_ROOT` (not used when backend is s3). Restart: `docker compose up -d api director postprocess`.
 
-4. **On the GPU VM:** when you run the worker container (Step 9), use the same bucket and credentials instead of local storage:
+4. **On the GPU VM:** when you run the worker container (Step 9), use the same bucket and credentials instead of local storage. Run this **on the GPU VM** (replace `API_INTERNAL_IP` with the API VM internal IP from Step 5, and use your HMAC access ID and secret):
 
 ```bash
--e STORAGE_BACKEND=s3 \
--e OUTPUT_BUCKET=vira-488000-vira-storage \
--e AWS_REGION=auto \
--e AWS_ACCESS_KEY_ID=<your-HMAC-access-id> \
--e AWS_SECRET_ACCESS_KEY=<your-HMAC-secret> \
--e AWS_ENDPOINT_URL=https://storage.googleapis.com
+docker run --gpus all -d --restart unless-stopped \
+  -e DATABASE_URL=postgresql+psycopg://postgres:postgres@API_INTERNAL_IP:5432/vira \
+  -e REDIS_URL=redis://API_INTERNAL_IP:6379/0 \
+  -e STORAGE_BACKEND=s3 \
+  -e OUTPUT_BUCKET=vira-488000-vira-storage \
+  -e AWS_REGION=auto \
+  -e AWS_ACCESS_KEY_ID=YOUR_HMAC_ACCESS_ID \
+  -e AWS_SECRET_ACCESS_KEY=YOUR_HMAC_SECRET \
+  -e AWS_ENDPOINT_URL=https://storage.googleapis.com \
+  -e MODEL_BACKEND=wan \
+  -e WAN_MODEL_PATH=/models/wan2 \
+  -e WAN_DEVICE=cuda \
+  -e WAN_DTYPE=float16 \
+  -e WAN_VRAM_MODE=safe \
+  -v /home/$USER/wan2-weights:/models/wan2:ro \
+  --name vira-wan-worker \
+  vira-worker-gpu celery -A common.celery_app.celery_app worker -Q gpu --concurrency=1 --loglevel=info
 ```
 
-Omit `-v /mnt/vira-storage:/data/storage` and `STORAGE_ROOT` when using S3; the app uses the bucket for read/write.
+Replace `API_INTERNAL_IP`, `YOUR_HMAC_ACCESS_ID`, and `YOUR_HMAC_SECRET` with your values. Do **not** add `-v /mnt/vira-storage:/data/storage` when using S3.
 
 ---
 
