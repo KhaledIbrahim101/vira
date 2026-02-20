@@ -13,6 +13,14 @@ def _run(cmd: list[str]):
     subprocess.run(cmd, check=True)
 
 
+def _interpolate_fps(input_path: str, output_path: str, target_fps: int) -> None:
+    """Change framerate; try minterpolate (motion interpolation), fallback to fps filter (dup/drop)."""
+    try:
+        _run(["ffmpeg", "-y", "-i", input_path, "-vf", f"minterpolate=fps={target_fps}", "-c:v", "libx264", "-c:a", "aac", output_path])
+    except subprocess.CalledProcessError:
+        _run(["ffmpeg", "-y", "-i", input_path, "-vf", f"fps={target_fps}", "-c:v", "libx264", "-c:a", "aac", output_path])
+
+
 def _apply_post_pipeline(stitched: str, out_dir: Path, cfg: PostprocessConfig) -> str:
     current = stitched
     if cfg.upscale_enabled:
@@ -22,7 +30,7 @@ def _apply_post_pipeline(stitched: str, out_dir: Path, cfg: PostprocessConfig) -
 
     if cfg.interpolation_enabled:
         interp = str(out_dir / "interpolated.mp4")
-        _run(["ffmpeg", "-y", "-i", current, "-vf", f"minterpolate=fps={cfg.target_fps}", "-c:v", "libx264", "-c:a", "aac", interp])
+        _interpolate_fps(current, interp, cfg.target_fps)
         current = interp
 
     if cfg.denoise_enabled:
