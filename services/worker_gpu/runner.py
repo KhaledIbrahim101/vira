@@ -72,8 +72,8 @@ class WanRunner(ModelRunner):
         self._imageio = self._import("imageio")
         self._np = self._import("numpy")
         self._PILImage = self._import("PIL.Image", attr="Image")
-        self._AutoPipelineForTextToVideo = self._import("diffusers", attr="AutoPipelineForTextToVideo")
-        self._AutoPipelineForImageToVideo = self._import("diffusers", attr="AutoPipelineForImageToVideo")
+        # Use DiffusionPipeline so we work across diffusers versions (AutoPipelineForTextToVideo not in all releases)
+        self._DiffusionPipeline = self._import("diffusers", attr="DiffusionPipeline")
 
         self._dtype = self._resolve_dtype(dtype)
         self._t2v = self._load_t2v_pipeline()
@@ -99,7 +99,7 @@ class WanRunner(ModelRunner):
 
     def _load_t2v_pipeline(self):
         try:
-            pipe = self._AutoPipelineForTextToVideo.from_pretrained(self.model_path, torch_dtype=self._dtype)
+            pipe = self._DiffusionPipeline.from_pretrained(self.model_path, torch_dtype=self._dtype)
             pipe.to(self.device)
             self._apply_vram_mode(pipe)
             return pipe
@@ -109,14 +109,8 @@ class WanRunner(ModelRunner):
             ) from exc
 
     def _load_i2v_pipeline(self):
-        try:
-            pipe = self._AutoPipelineForImageToVideo.from_pretrained(self.model_path, torch_dtype=self._dtype)
-            pipe.to(self.device)
-            self._apply_vram_mode(pipe)
-            return pipe
-        except Exception:
-            logger.warning("Wan I2V pipeline not available from model path; falling back to T2V pipeline for image conditioning unsupported.")
-            return None
+        # Reuse T2V pipeline; many Wan-style checkpoints support both prompt= and image= in __call__
+        return self._t2v
 
     def _apply_vram_mode(self, pipe: Any):
         mode = self.vram_mode
