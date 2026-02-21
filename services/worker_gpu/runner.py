@@ -51,7 +51,7 @@ class DummyRunner(ModelRunner):
 
 
 class WanRunner(ModelRunner):
-    """Wan2.x-backed runner (T2V + I2V) with OOM fallback and one-time model loading."""
+    """Wan2.x-backed runner (T2V + I2V) with OOM fallback. Model is loaded once on first shot and cached for all subsequent shots."""
 
     def __init__(
         self,
@@ -77,8 +77,9 @@ class WanRunner(ModelRunner):
 
         self._dtype = self._resolve_dtype(dtype)
         self._model_root = self._resolve_model_root(Path(model_path))
-        self._t2v = self._load_t2v_pipeline()
-        self._i2v = self._load_i2v_pipeline()
+        # Lazy-load pipelines on first use; reuse for all shots (no reload per shot)
+        self._t2v: Any = None
+        self._i2v: Any = None
 
     def _import(self, module_name: str, attr: str | None = None):
         try:
@@ -111,8 +112,13 @@ class WanRunner(ModelRunner):
         try:
             load_path = str(self._model_root)
             pipe = self._DiffusionPipeline.from_pretrained(load_path, torch_dtype=self._dtype)
-            pipe.to(self.device)
-            self._apply_vram_mode(pipe)
+            # In safe mode use CPU offload so we never put the full model on GPU (avoids OOM on 16GB).
+            if self.vram_mode == "safe" and hasattr(pipe, "enable_model_cpu_offload"):
+                self._apply_vram_mode(pipe)
+                # Do not call pipe.to(device); offload keeps weights on CPU and moves to GPU per layer during inference.
+            else:
+                pipe.to(self.device)
+                self._apply_vram_mode(pipe)
             return pipe
         except Exception as exc:
             try:
@@ -125,9 +131,16 @@ class WanRunner(ModelRunner):
                 f"Contents of WAN_MODEL_PATH: {listing}"
             ) from exc
 
-    def _load_i2v_pipeline(self):
-        # Reuse T2V pipeline; many Wan-style checkpoints support both prompt= and image= in __call__
+    def _get_t2v(self):
+        """Load T2V pipeline once on first use; return cached pipeline for all subsequent shots."""
+        if self._t2v is None:
+            self._t2v = self._load_t2v_pipeline()
+            logger.info("Wan T2V model loaded (cached for all shots in this worker)")
         return self._t2v
+
+    def _get_i2v(self):
+        """Reuse T2V pipeline for I2V; many Wan checkpoints support both prompt= and image= in __call__."""
+        return self._get_t2v()
 
     def _apply_vram_mode(self, pipe: Any):
         mode = self.vram_mode
@@ -173,7 +186,8 @@ class WanRunner(ModelRunner):
     def _run_t2v_once(self, shot_prompt: str, negative_prompt: str, frames: int, resolution: str, seed: int):
         width, height = self._parse_res(resolution)
         generator = self._torch.Generator(device=self.device).manual_seed(seed)
-        output = self._t2v(
+        pipe = self._get_t2v()
+        output = pipe(
             prompt=shot_prompt,
             negative_prompt=negative_prompt,
             num_frames=frames,
@@ -184,12 +198,11 @@ class WanRunner(ModelRunner):
         return output.frames[0] if hasattr(output, "frames") else output[0]
 
     def _run_i2v_once(self, ref_image: str, shot_prompt: str, negative_prompt: str, frames: int, resolution: str, seed: int):
-        if self._i2v is None:
-            raise RuntimeError("Wan I2V pipeline unavailable in current model package.")
         width, height = self._parse_res(resolution)
         generator = self._torch.Generator(device=self.device).manual_seed(seed)
         image = self._PILImage.open(ref_image).convert("RGB").resize((width, height))
-        output = self._i2v(
+        pipe = self._get_i2v()
+        output = pipe(
             image=image,
             prompt=shot_prompt,
             negative_prompt=negative_prompt,

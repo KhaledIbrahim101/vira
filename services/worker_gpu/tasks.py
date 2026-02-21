@@ -1,3 +1,4 @@
+import logging
 import subprocess
 from pathlib import Path
 from common.celery_app import celery_app
@@ -7,7 +8,10 @@ from common.models import Job, JobStatus, Shot, ShotStatus
 from common.storage import StorageClient
 from services.worker_gpu.runner import DummyRunner, ModelRunner, WanRunner
 
+logger = logging.getLogger(__name__)
 storage = StorageClient()
+
+# Single runner per worker process: model is loaded once (on first shot) and reused for all shots in this process.
 _runner: ModelRunner | None = None
 
 
@@ -17,6 +21,7 @@ def get_runner() -> ModelRunner:
         return _runner
 
     if settings.model_backend == "wan":
+        logger.info("Creating Wan runner (model will load on first shot and be cached for all shots)")
         _runner = WanRunner(
             model_path=settings.wan_model_path,
             device=settings.wan_device,
