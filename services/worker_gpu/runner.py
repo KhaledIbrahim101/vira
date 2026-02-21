@@ -6,6 +6,14 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+# Load ftfy before any Wan pipeline runs; tokenizer may reference it by name.
+try:
+    import ftfy as _ftfy
+    import builtins
+    builtins.ftfy = _ftfy  # some tokenizers expect 'ftfy' in scope
+except ImportError:
+    _ftfy = None  # type: ignore[misc, assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,6 +118,10 @@ class WanRunner(ModelRunner):
 
     def _load_t2v_pipeline(self):
         try:
+            if _ftfy is None:
+                raise RuntimeError(
+                    "Wan tokenizer requires 'ftfy'. Install with: pip install ftfy"
+                )
             load_path = str(self._model_root)
             pipe = self._DiffusionPipeline.from_pretrained(load_path, torch_dtype=self._dtype)
             # In safe mode use CPU offload so we never put the full model on GPU (avoids OOM on 16GB).
