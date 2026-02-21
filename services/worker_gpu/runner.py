@@ -76,6 +76,7 @@ class WanRunner(ModelRunner):
         self._DiffusionPipeline = self._import("diffusers", attr="DiffusionPipeline")
 
         self._dtype = self._resolve_dtype(dtype)
+        self._model_root = self._resolve_model_root(Path(model_path))
         self._t2v = self._load_t2v_pipeline()
         self._i2v = self._load_i2v_pipeline()
 
@@ -97,15 +98,31 @@ class WanRunner(ModelRunner):
         }
         return mapping.get(dtype, self._torch.float16)
 
+    def _resolve_model_root(self, path: Path) -> Path:
+        """Return the directory that contains model_index.json (may be path or a single subdir)."""
+        if (path / "model_index.json").exists():
+            return path
+        for sub in path.iterdir():
+            if sub.is_dir() and (sub / "model_index.json").exists():
+                return sub
+        return path
+
     def _load_t2v_pipeline(self):
         try:
-            pipe = self._DiffusionPipeline.from_pretrained(self.model_path, torch_dtype=self._dtype)
+            load_path = str(self._model_root)
+            pipe = self._DiffusionPipeline.from_pretrained(load_path, torch_dtype=self._dtype)
             pipe.to(self.device)
             self._apply_vram_mode(pipe)
             return pipe
         except Exception as exc:
+            try:
+                listing = list(Path(self.model_path).iterdir()) if Path(self.model_path).exists() else []
+            except Exception:
+                listing = []
             raise RuntimeError(
-                f"Failed to load Wan T2V model from '{self.model_path}'. Mount weights and verify WAN_MODEL_PATH."
+                f"Failed to load Wan T2V model from '{self.model_path}' (resolved to '{self._model_root}'). "
+                f"Ensure the volume mount points to a diffusers model dir containing model_index.json. "
+                f"Contents of WAN_MODEL_PATH: {listing}"
             ) from exc
 
     def _load_i2v_pipeline(self):

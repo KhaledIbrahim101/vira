@@ -269,7 +269,7 @@ gsutil mb -p vira-488000 -l asia-southeast1 gs://vira-488000-vira-storage
 2. **Create HMAC keys** for S3-compatible access (GCS Interoperability).  
    - **Console:** [Cloud Storage → Settings → Interoperability](https://console.cloud.google.com/storage/settings;tab=interoperability) → Create a key for a service account (create one under IAM if needed). Copy the **Access Key** and **Secret**.  
    - **gcloud:** Create a service account, then create HMAC key:
-3kS2sTk2c6wfdHPXGqkJtIyfmq363Iq4/W4aMqvF
+
 ```bash
 # Create a service account for storage (if you don't have one)
 gcloud iam service-accounts create vira-storage --project=vira-488000 --display-name="Vira GCS S3"
@@ -319,6 +319,24 @@ docker run --gpus all -d --restart unless-stopped \
 
 Replace `API_INTERNAL_IP`, `YOUR_HMAC_ACCESS_ID`, and `YOUR_HMAC_SECRET` with your values. Do **not** add `-v /mnt/vira-storage:/data/storage` when using S3.
 
+docker run --gpus all -d --restart unless-stopped \
+  -e DATABASE_URL=postgresql+psycopg://postgres:postgres@10.0.0.2:5432/vira \
+  -e REDIS_URL=redis://10.0.0.2:6379/0 \
+  -e STORAGE_BACKEND=s3 \
+  -e OUTPUT_BUCKET=vira-488000-vira-storage \
+  -e AWS_REGION=auto \
+  -e AWS_ACCESS_KEY_ID=YOUR_HMAC_ACCESS_ID \
+  -e AWS_SECRET_ACCESS_KEY=YOUR_HMAC_SECRET \
+  -e AWS_ENDPOINT_URL=https://storage.googleapis.com \
+  -e MODEL_BACKEND=wan \
+  -e WAN_MODEL_PATH=/models/wan2 \
+  -e WAN_DEVICE=cuda \
+  -e WAN_DTYPE=float16 \
+  -e WAN_VRAM_MODE=safe \
+  -v /home/$USER/wan2-weights:/models/wan2:ro \
+  --name vira-wan-worker \
+  vira-worker-gpu celery -A common.celery_app.celery_app worker -Q gpu --concurrency=1 --loglevel=info
+
 ---
 
 **Step 9 – On the GPU VM: clone repo, model weights, build and run worker**
@@ -331,9 +349,35 @@ gcloud compute ssh vira-gpu-worker --project=vira-488000 --zone=asia-southeast1-
 
 Replace `API_INTERNAL_IP` with the value from Step 5. If using Filestore, use that mount path; if using GCS, set `STORAGE_BACKEND=s3` and the same bucket/credentials.
 
+**Option 1 – 1.3B model (recommended for T4 / 16GB VRAM to avoid OOM):**
+
+```bash
+# On the GPU VM: create dir and download Wan 1.3B Diffusers
+export WAN_WEIGHTS_DIR="${WAN_WEIGHTS_DIR:-/home/$USER/wan13-weights}"
+mkdir -p "$WAN_WEIGHTS_DIR"
+pip install -q huggingface_hub
+python3 -c "
+from huggingface_hub import snapshot_download
+snapshot_download('Wan-AI/Wan2.1-T2V-1.3B-Diffusers', local_dir='$WAN_WEIGHTS_DIR', local_dir_use_symlinks=False)
+"
+# Then build and run (use the same docker run as below with -v $WAN_WEIGHTS_DIR:/models/wan2:ro)
+```
+
+**Full Step 9 (clone, 1.3B weights, build, run):**
+
 ```bash
 git clone <your-repo-url> vira && cd vira
-# Download/cache a diffusers-compatible text-to-video model into e.g. /home/$USER/wan2-weights
+
+# Download 1.3B model (avoids OOM on T4/16GB)
+export WAN_WEIGHTS_DIR="${WAN_WEIGHTS_DIR:-/home/$USER/wan13-weights}"
+mkdir -p "$WAN_WEIGHTS_DIR"
+pip install -q huggingface_hub
+python3 -c "
+from huggingface_hub import snapshot_download
+import os
+snapshot_download('Wan-AI/Wan2.1-T2V-1.3B-Diffusers', local_dir=os.environ['WAN_WEIGHTS_DIR'], local_dir_use_symlinks=False)
+"
+
 docker build -f services/worker_gpu/Dockerfile.gpu -t vira-worker-gpu .
 docker run --gpus all -d --restart unless-stopped \
   -e DATABASE_URL=postgresql+psycopg://postgres:postgres@API_INTERNAL_IP:5432/vira \
@@ -345,13 +389,15 @@ docker run --gpus all -d --restart unless-stopped \
   -e WAN_DEVICE=cuda \
   -e WAN_DTYPE=float16 \
   -e WAN_VRAM_MODE=safe \
-  -v /home/$USER/wan2-weights:/models/wan2:ro \
+  -v "$WAN_WEIGHTS_DIR":/models/wan2:ro \
   -v /mnt/vira-storage:/data/storage \
   --name vira-wan-worker \
   vira-worker-gpu celery -A common.celery_app.celery_app worker -Q gpu --concurrency=1 --loglevel=info
 ```
 
-If using GCS instead of a shared mount, set `-e STORAGE_BACKEND=s3` and the same bucket/credentials; omit or adjust the `-v /mnt/vira-storage:/data/storage` volume.
+If using GCS instead of a shared mount, set `-e STORAGE_BACKEND=s3` and the same bucket/credentials; omit or adjust the `-v /mnt/vira-storage:/data/storage` volume. For the GCS docker run block (with 10.0.0.2 and HMAC), use `-v "$WAN_WEIGHTS_DIR":/models/wan2:ro` after downloading 1.3B into `WAN_WEIGHTS_DIR`.
+
+**Free disk after switching to 1.3B:** stop the worker, then remove the old 14B weights dir (e.g. `rm -rf /home/$USER/wan2-weights`) so the VM reclaims that disk space. See “Free disk: remove old Wan weights” below.
 
 ---
 
@@ -366,10 +412,13 @@ gcloud compute instances describe vira-api --project=vira-488000 --zone=asia-sou
 From your PC, submit a job (replace `API_EXTERNAL_IP`):
 
 ```bash
-curl -X POST http://API_EXTERNAL_IP:8000/jobs -H "content-type: application/json" -d "{\"prompt\":\"cinematic anime swordswoman under moonlight\",\"duration_sec\":12,\"aspect_ratio\":\"16:9\"}"
+curl -X POST http://34.177.93.19:8000/jobs -H "content-type: application/json" -d "{\"prompt\":\"cinematic anime swordswoman under moonlight\",\"duration_sec\":12,\"aspect_ratio\":\"16:9\"}"
 ```
 
 The job should be picked up by the GPU worker; the final video should reflect your prompt.
+
+curl http://34.177.93.19:8000/jobs/d19e7470-2792-4406-a6b2-4067745e08e9
+curl -L http://34.177.93.19:8000/jobs/8b825cb6-d7f0-4b9b-9682-639f8f2194b7/result --output result.mp4
 
 ---
 
@@ -382,6 +431,7 @@ The job should be picked up by the GPU worker; the final video should reflect yo
 2. **Get model weights**
    - Obtain a diffusers-compatible text-to-video model (e.g. Wan 2.x or compatible Hugging Face model).
    - Save/cache it in a directory on the host, e.g. `/path/to/wan2-weights`, with the layout expected by `diffusers` `AutoPipelineForTextToVideo.from_pretrained(local_path)`.
+   - **Default for small GPUs (e.g. T4 16GB):** use **Wan2.1-T2V-1.3B-Diffusers** (`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`) to avoid OOM; the 14B model requires a larger VM (e.g. 24GB+ VRAM).
 
 3. **Build the GPU worker image**
    ```bash
@@ -460,6 +510,25 @@ Resume unfinished job:
 ```bash
 curl -X POST http://localhost:8000/jobs/<job_id>/resume
 ```
+
+### Free disk: remove old Wan weights
+
+After switching to the 1.3B model (or any new model path), free disk on the GPU VM by removing the old weights directory. **Do this only after the worker is stopped and you are no longer using that path.**
+
+On the GPU VM:
+
+```bash
+# 1. Stop and remove the worker (so nothing is using the old mount)
+docker stop vira-wan-worker 2>/dev/null; docker rm vira-wan-worker 2>/dev/null
+
+# 2. Remove the old 14B weights dir (adjust path if you used a different one)
+rm -rf /home/$USER/wan2-weights
+
+# 3. Optionally reclaim space from Docker (images, build cache)
+docker system prune -f
+```
+
+Then start the worker again with the new model (e.g. 1.3B in `$WAN_WEIGHTS_DIR`).
 
 ## 9) Common issues
 
