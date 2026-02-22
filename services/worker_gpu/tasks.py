@@ -37,6 +37,7 @@ def get_runner() -> ModelRunner:
             dtype=settings.wan_dtype,
             vram_mode=settings.wan_vram_mode,
             num_inference_steps=settings.wan_num_inference_steps,
+            try_full_resolution_first=settings.wan_try_full_resolution_first,
         )
     else:
         _runner = DummyRunner()

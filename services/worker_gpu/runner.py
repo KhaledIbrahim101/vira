@@ -75,11 +75,18 @@ class WanRunner(ModelRunner):
         vram_mode: str = "safe",
         num_inference_steps: int = 25,
         output_root: str = "/tmp/vira",
+        try_full_resolution_first: bool = False,
     ):
         self.model_path = model_path
         self.device = device
         self.dtype = dtype
-        self.vram_mode = vram_mode
+        # 24g/auto: try full res first and use balanced-like memory options
+        if vram_mode in ("24g", "auto"):
+            self.vram_mode = "balanced"
+            self._try_full_resolution_first = True
+        else:
+            self.vram_mode = vram_mode
+            self._try_full_resolution_first = try_full_resolution_first
         self.num_inference_steps = num_inference_steps
         self.output_root = Path(output_root)
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -96,6 +103,8 @@ class WanRunner(ModelRunner):
         # Lazy-load pipelines on first use; reuse for all shots (no reload per shot)
         self._t2v: Any = None
         self._i2v: Any = None
+        # When True, next _run_t2v_once/_run_i2v_once uses sequential CPU offload (for OOM fallback retries)
+        self._use_sequential_offload_for_next_run = False
 
     def _import(self, module_name: str, attr: str | None = None):
         try:
@@ -131,15 +140,27 @@ class WanRunner(ModelRunner):
                     "Wan tokenizer requires 'ftfy'. Install with: pip install ftfy"
                 )
             load_path = str(self._model_root)
-            # Official README: load VAE in float32 for correct decoding (avoids gray/wrong output)
+            # Official README: load VAE in float32 for correct decoding (avoids gray/wrong output).
+            # Never fall back to default pipeline VAE (float16) — that produces gray output.
+            vae = None
             try:
                 AutoencoderKLWan = self._import("diffusers", attr="AutoencoderKLWan")
                 vae = AutoencoderKLWan.from_pretrained(load_path, subfolder="vae", torch_dtype=self._torch.float32)
-                pipe = self._DiffusionPipeline.from_pretrained(load_path, vae=vae, torch_dtype=self._dtype)
-                logger.info("Wan pipeline loaded with float32 VAE for decoding")
+                logger.info("Wan pipeline loaded with AutoencoderKLWan (float32) for decoding")
             except Exception as vae_exc:
-                logger.warning("Could not load Wan VAE in float32, using default: %s", vae_exc)
-                pipe = self._DiffusionPipeline.from_pretrained(load_path, torch_dtype=self._dtype)
+                logger.debug("AutoencoderKLWan not available, trying AutoModel for VAE: %s", vae_exc)
+                try:
+                    AutoModel = self._import("diffusers", attr="AutoModel")
+                    vae = AutoModel.from_pretrained(load_path, subfolder="vae", torch_dtype=self._torch.float32)
+                    logger.info("Wan pipeline loaded with AutoModel VAE (float32) for decoding")
+                except Exception as auto_exc:
+                    raise RuntimeError(
+                        "Wan VAE must be loaded in float32 to avoid gray output. "
+                        "AutoencoderKLWan and AutoModel fallback both failed. "
+                        f"AutoencoderKLWan: {vae_exc!r}; AutoModel: {auto_exc!r}. "
+                        "Ensure the model path contains a valid vae subfolder and diffusers supports this checkpoint."
+                    ) from auto_exc
+            pipe = self._DiffusionPipeline.from_pretrained(load_path, vae=vae, torch_dtype=self._dtype)
             # In safe mode use CPU offload so we never put the full model on GPU (avoids OOM on 16GB).
             if self.vram_mode == "safe" and hasattr(pipe, "enable_model_cpu_offload"):
                 self._apply_vram_mode(pipe)
@@ -182,9 +203,17 @@ class WanRunner(ModelRunner):
                 pipe.enable_vae_slicing()
             if hasattr(pipe, "enable_attention_slicing"):
                 pipe.enable_attention_slicing()
+            if hasattr(pipe, "enable_vae_tiling"):
+                pipe.enable_vae_tiling()
+            # Gradient checkpointing reduces activation memory (safe mode)
+            _apply_gradient_checkpointing(pipe)
         elif mode == "balanced":
             if hasattr(pipe, "enable_vae_slicing"):
                 pipe.enable_vae_slicing()
+            if hasattr(pipe, "enable_attention_slicing"):
+                pipe.enable_attention_slicing()
+            if hasattr(pipe, "enable_vae_tiling"):
+                pipe.enable_vae_tiling()
         # max mode leaves defaults
 
     def _parse_res(self, resolution: str) -> tuple[int, int]:
@@ -195,6 +224,19 @@ class WanRunner(ModelRunner):
     def _round_to_multiple_16(w: int, h: int) -> tuple[int, int]:
         """Wan requires width and height divisible by 16."""
         return (w // 16) * 16, (h // 16) * 16
+
+
+def _apply_gradient_checkpointing(pipe: Any) -> None:
+    """Enable gradient checkpointing on transformer (or main module) when available to reduce activation memory."""
+    for attr in ("transformer", "unet"):
+        mod = getattr(pipe, attr, None)
+        if mod is not None and hasattr(mod, "enable_gradient_checkpointing"):
+            try:
+                mod.enable_gradient_checkpointing()
+                logger.debug("Enabled gradient checkpointing on pipeline.%s", attr)
+                return
+            except Exception as e:
+                logger.debug("Gradient checkpointing on %s skipped: %s", attr, e)
 
     def _clear_gpu_memory(self):
         """Free GPU cache and run GC."""
@@ -295,6 +337,12 @@ class WanRunner(ModelRunner):
             len(float_frames), getattr(f0, "shape", None), gmin, gmax,
         )
         span = max(gmax - gmin, 1e-6)
+        if gmax - gmin < 1e-5:
+            logger.warning(
+                "Pipeline output is nearly constant (global_min=%.4f global_max=%.4f). "
+                "Possible model/weight or VAE decoding issue; video may appear gray or wrong.",
+                gmin, gmax,
+            )
         out = [((a - gmin) / span * 255).clip(0, 255).astype(self._np.uint8) for a in float_frames]
         if hasattr(self._torch.cuda, "empty_cache"):
             self._torch.cuda.empty_cache()
@@ -330,15 +378,7 @@ class WanRunner(ModelRunner):
             raise RuntimeError(f"ffmpeg exited with code {ret}")
 
     def _write_pipeline_output_to_mp4(self, video_frames, fps: int, out_path: Path):
-        """Write pipeline output to MP4: try diffusers export_to_video (matches README), else materialize + ffmpeg."""
-        for mod_name in ("diffusers.utils", "diffusers.utils.export_utils"):
-            try:
-                export_to_video = self._import(mod_name, attr="export_to_video")
-                export_to_video(video_frames, str(out_path), fps=fps)
-                logger.info("Wrote video with diffusers export_to_video")
-                return
-            except Exception as e:
-                logger.debug("export_to_video from %s: %s", mod_name, e)
+        """Write pipeline output to MP4 via normalized path so [0,1] and [-1,1] outputs are correct 0-255."""
         materialized = self._materialize_frames_and_free_gpu(video_frames)
         self._write_video(materialized, fps=fps, out_path=out_path)
 
@@ -346,9 +386,15 @@ class WanRunner(ModelRunner):
         width, height = self._parse_res(resolution)
         width, height = self._round_to_multiple_16(width, height)
         width, height = max(16, width), max(16, height)
-        generator = self._torch.Generator(device=self.device).manual_seed(seed)
+        # When using sequential CPU offload, generator on CPU avoids device mismatch in some diffusers versions
+        gen_device = "cpu" if getattr(self, "_use_sequential_offload_for_next_run", False) else self.device
+        generator = self._torch.Generator(device=gen_device).manual_seed(seed)
         pipe = self._get_t2v()
-        if self.vram_mode != "safe" and hasattr(pipe, "device") and str(pipe.device) != str(self.device):
+        if getattr(self, "_use_sequential_offload_for_next_run", False):
+            self._use_sequential_offload_for_next_run = False
+            if hasattr(pipe, "enable_sequential_cpu_offload"):
+                pipe.enable_sequential_cpu_offload()
+        elif self.vram_mode != "safe" and hasattr(pipe, "device") and str(pipe.device) != str(self.device):
             pipe.to(self.device)
         kwargs = dict(
             prompt=shot_prompt,
@@ -370,9 +416,14 @@ class WanRunner(ModelRunner):
         width, height = self._parse_res(resolution)
         width, height = self._round_to_multiple_16(width, height)
         width, height = max(16, width), max(16, height)
-        generator = self._torch.Generator(device=self.device).manual_seed(seed)
+        gen_device = "cpu" if getattr(self, "_use_sequential_offload_for_next_run", False) else self.device
+        generator = self._torch.Generator(device=gen_device).manual_seed(seed)
         pipe = self._get_i2v()
-        if self.vram_mode != "safe" and hasattr(pipe, "device") and str(pipe.device) != str(self.device):
+        if getattr(self, "_use_sequential_offload_for_next_run", False):
+            self._use_sequential_offload_for_next_run = False
+            if hasattr(pipe, "enable_sequential_cpu_offload"):
+                pipe.enable_sequential_cpu_offload()
+        elif self.vram_mode != "safe" and hasattr(pipe, "device") and str(pipe.device) != str(self.device):
             pipe.to(self.device)
         # Wan 1.3B is T2V-only (WanPipeline); I2V needs WanImageToVideoPipeline. Fall back to T2V if no image arg.
         kwargs_i2v = dict(
@@ -409,8 +460,8 @@ class WanRunner(ModelRunner):
         frames = max(9, frames)
         out = self.output_root / f"wan_t2v_{seed}.mp4"
         self._clear_gpu_memory()
-        # In safe/balanced mode full res often OOMs on 22GB; start at 640x352 so we don't fill GPU and block fallbacks
-        if self.vram_mode in ("safe", "balanced"):
+        # In safe/balanced mode, optionally pre-cap to 640x352 unless try_full_resolution_first (e.g. 24GB)
+        if self.vram_mode in ("safe", "balanced") and not getattr(self, "_try_full_resolution_first", False):
             resolution, frames = self._fallback_params(resolution, frames, level=2)
             logger.info("Wan T2V using capped resolution in %s mode", self.vram_mode, extra={"resolution": resolution, "frames": frames})
         try:
@@ -420,8 +471,9 @@ class WanRunner(ModelRunner):
                 raise
             logger.warning("Wan T2V error (treating as OOM), first attempt: %s", exc, exc_info=False)
             self._offload_pipeline_to_cpu_and_clear()
+            self._use_sequential_offload_for_next_run = True
             fallback_res, fallback_frames = self._fallback_params(resolution, frames, level=1)
-            logger.warning("Wan T2V OOM, retrying with fallback (75%%)", extra={"resolution": fallback_res, "frames": fallback_frames})
+            logger.warning("Wan T2V OOM, retrying with fallback (75%%) using CPU offload", extra={"resolution": fallback_res, "frames": fallback_frames})
             try:
                 video_frames = self._run_t2v_once(shot_prompt, negative_prompt, fallback_frames, fallback_res, seed)
             except Exception as exc2:
@@ -429,8 +481,9 @@ class WanRunner(ModelRunner):
                     raise
                 logger.warning("Wan T2V error, fallback 75%% failed: %s", exc2, exc_info=False)
                 self._offload_pipeline_to_cpu_and_clear()
+                self._use_sequential_offload_for_next_run = True
                 fallback_res2, fallback_frames2 = self._fallback_params(resolution, frames, level=2)
-                logger.warning("Wan T2V OOM, retrying with fallback level 2 (640x352)", extra={"resolution": fallback_res2, "frames": fallback_frames2})
+                logger.warning("Wan T2V OOM, retrying with fallback level 2 (640x352) using CPU offload", extra={"resolution": fallback_res2, "frames": fallback_frames2})
                 try:
                     video_frames = self._run_t2v_once(shot_prompt, negative_prompt, fallback_frames2, fallback_res2, seed)
                 except Exception as exc3:
@@ -438,14 +491,20 @@ class WanRunner(ModelRunner):
                         raise
                     logger.warning("Wan T2V error, fallback level 2 failed: %s", exc3, exc_info=False)
                     self._offload_pipeline_to_cpu_and_clear()
+                    self._use_sequential_offload_for_next_run = True
                     fallback_res3, fallback_frames3 = self._fallback_params(resolution, frames, level=3)
-                    logger.warning("Wan T2V OOM, retrying with fallback level 3 (512x320)", extra={"resolution": fallback_res3, "frames": fallback_frames3})
+                    logger.warning("Wan T2V OOM, retrying with fallback level 3 (512x320) using CPU offload", extra={"resolution": fallback_res3, "frames": fallback_frames3})
                     try:
                         video_frames = self._run_t2v_once(shot_prompt, negative_prompt, fallback_frames3, fallback_res3, seed)
                     except Exception as exc4:
                         logger.warning("Wan T2V error, fallback level 3 failed: %s", exc4, exc_info=False)
                         raise RuntimeError("Wan T2V failed after OOM fallbacks (reduced resolution/frames).") from exc4
         self._write_pipeline_output_to_mp4(video_frames, fps=fps, out_path=out)
+        if self.vram_mode != "safe" and self._t2v is not None:
+            try:
+                self._t2v.to(self.device)
+            except Exception:
+                pass
         return str(out)
 
     def generate_video_from_image(self, ref_image: str, shot_prompt: str, negative_prompt: str, duration: int, resolution: str, fps: int, seed: int) -> str:
@@ -454,7 +513,7 @@ class WanRunner(ModelRunner):
         frames = max(9, frames)
         out = self.output_root / f"wan_i2v_{seed}.mp4"
         self._clear_gpu_memory()
-        if self.vram_mode in ("safe", "balanced"):
+        if self.vram_mode in ("safe", "balanced") and not getattr(self, "_try_full_resolution_first", False):
             resolution, frames = self._fallback_params(resolution, frames, level=2)
             logger.info("Wan I2V using capped resolution in %s mode", self.vram_mode, extra={"resolution": resolution, "frames": frames})
         try:
@@ -463,27 +522,35 @@ class WanRunner(ModelRunner):
             if not self._is_oom(exc):
                 raise
             self._offload_pipeline_to_cpu_and_clear()
+            self._use_sequential_offload_for_next_run = True
             fallback_res, fallback_frames = self._fallback_params(resolution, frames, level=1)
-            logger.warning("Wan I2V OOM, retrying with fallback (75%%)", extra={"resolution": fallback_res, "frames": fallback_frames})
+            logger.warning("Wan I2V OOM, retrying with fallback (75%%) using CPU offload", extra={"resolution": fallback_res, "frames": fallback_frames})
             try:
                 video_frames = self._run_i2v_once(ref_image, shot_prompt, negative_prompt, fallback_frames, fallback_res, seed)
             except Exception as exc2:
                 if not self._is_oom(exc2):
                     raise
                 self._offload_pipeline_to_cpu_and_clear()
+                self._use_sequential_offload_for_next_run = True
                 fallback_res2, fallback_frames2 = self._fallback_params(resolution, frames, level=2)
-                logger.warning("Wan I2V OOM, retrying with fallback level 2 (640x352)", extra={"resolution": fallback_res2, "frames": fallback_frames2})
+                logger.warning("Wan I2V OOM, retrying with fallback level 2 (640x352) using CPU offload", extra={"resolution": fallback_res2, "frames": fallback_frames2})
                 try:
                     video_frames = self._run_i2v_once(ref_image, shot_prompt, negative_prompt, fallback_frames2, fallback_res2, seed)
                 except Exception as exc3:
                     if not self._is_oom(exc3):
                         raise
                     self._offload_pipeline_to_cpu_and_clear()
+                    self._use_sequential_offload_for_next_run = True
                     fallback_res3, fallback_frames3 = self._fallback_params(resolution, frames, level=3)
-                    logger.warning("Wan I2V OOM, retrying with fallback level 3 (512x320)", extra={"resolution": fallback_res3, "frames": fallback_frames3})
+                    logger.warning("Wan I2V OOM, retrying with fallback level 3 (512x320) using CPU offload", extra={"resolution": fallback_res3, "frames": fallback_frames3})
                     try:
                         video_frames = self._run_i2v_once(ref_image, shot_prompt, negative_prompt, fallback_frames3, fallback_res3, seed)
                     except Exception as exc4:
                         raise RuntimeError("Wan I2V failed after OOM fallbacks (reduced resolution/frames).") from exc4
         self._write_pipeline_output_to_mp4(video_frames, fps=fps, out_path=out)
+        if self.vram_mode != "safe" and self._t2v is not None:
+            try:
+                self._t2v.to(self.device)
+            except Exception:
+                pass
         return str(out)

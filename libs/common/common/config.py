@@ -21,7 +21,8 @@ class Settings(BaseSettings):
     wan_model_path: str = "/models/wan2"
     wan_device: str = "cuda"
     wan_dtype: str = "float16"  # float16 | bfloat16 | float32
-    wan_vram_mode: str = "safe"  # safe | balanced | max
+    wan_vram_mode: str = "safe"  # safe | balanced | max | 24g | auto
+    wan_try_full_resolution_first: bool = False  # when True, skip pre-cap; try requested res first (for 24GB+)
     wan_num_inference_steps: int = 25  # fewer steps = faster, less quality (default 50 in pipeline)
 
     class Config:
