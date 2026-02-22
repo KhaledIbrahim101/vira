@@ -1,3 +1,12 @@
+# Set before any torch/CUDA import (PyTorch reads PYTORCH_ALLOC_CONF; docker -e often uses lowercase)
+import os
+_alloc = os.environ.get("PYTORCH_ALLOC_CONF") or os.environ.get("pytorch_alloc_conf") or ""
+if "expandable_segments" not in _alloc.lower():
+    _alloc = "expandable_segments:True"
+else:
+    _alloc = "expandable_segments:True"  # canonical form (capital T)
+os.environ["PYTORCH_ALLOC_CONF"] = _alloc
+
 import logging
 import subprocess
 from pathlib import Path

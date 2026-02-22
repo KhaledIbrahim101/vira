@@ -8,8 +8,9 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
-# Reduce CUDA fragmentation so OOM fallbacks have a chance to allocate (see PyTorch memory docs)
-os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+# Ensure PyTorch allocator config is set before torch is imported (tasks.py sets it earlier; this is fallback)
+if "expandable_segments" not in os.environ.get("PYTORCH_ALLOC_CONF", "").lower():
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 # Load ftfy before any Wan pipeline runs; tokenizer may reference it by name.
 try:
