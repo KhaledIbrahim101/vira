@@ -184,13 +184,7 @@ class WanRunner(ModelRunner):
         return (w // 16) * 16, (h // 16) * 16
 
     def _clear_gpu_memory(self):
-        """Move pipeline to CPU and free GPU cache so the next inference has room (e.g. after OOM or between shots)."""
-        pipe = getattr(self, "_t2v", None)
-        if pipe is not None and hasattr(pipe, "to"):
-            try:
-                pipe.to("cpu")
-            except Exception:
-                pass
+        """Free GPU cache and run GC. Avoid moving float16 pipeline to CPU (unsupported); just clear cache."""
         if hasattr(self._torch.cuda, "empty_cache"):
             self._torch.cuda.empty_cache()
         gc.collect()
@@ -291,6 +285,10 @@ class WanRunner(ModelRunner):
         frames = max(9, frames)
         out = self.output_root / f"wan_t2v_{seed}.mp4"
         self._clear_gpu_memory()
+        # In safe/balanced mode full res often OOMs on 22GB; start at 640x352 so we don't fill GPU and block fallbacks
+        if self.vram_mode in ("safe", "balanced"):
+            resolution, frames = self._fallback_params(resolution, frames, level=2)
+            logger.info("Wan T2V using capped resolution in %s mode", self.vram_mode, extra={"resolution": resolution, "frames": frames})
         try:
             video_frames = self._run_t2v_once(shot_prompt, negative_prompt, frames, resolution, seed)
         except Exception as exc:
@@ -333,6 +331,9 @@ class WanRunner(ModelRunner):
         frames = max(9, frames)
         out = self.output_root / f"wan_i2v_{seed}.mp4"
         self._clear_gpu_memory()
+        if self.vram_mode in ("safe", "balanced"):
+            resolution, frames = self._fallback_params(resolution, frames, level=2)
+            logger.info("Wan I2V using capped resolution in %s mode", self.vram_mode, extra={"resolution": resolution, "frames": frames})
         try:
             video_frames = self._run_i2v_once(ref_image, shot_prompt, negative_prompt, frames, resolution, seed)
         except Exception as exc:
