@@ -283,6 +283,7 @@ class WanRunner(ModelRunner):
         except Exception as exc:
             if not self._is_oom(exc):
                 raise
+            logger.warning("Wan T2V error (treating as OOM), first attempt: %s", exc, exc_info=False)
             fallback_res, fallback_frames = self._fallback_params(resolution, frames, level=1)
             logger.warning("Wan T2V OOM, retrying with fallback (75%%)", extra={"resolution": fallback_res, "frames": fallback_frames})
             try:
@@ -290,6 +291,7 @@ class WanRunner(ModelRunner):
             except Exception as exc2:
                 if not self._is_oom(exc2):
                     raise
+                logger.warning("Wan T2V error, fallback 75%% failed: %s", exc2, exc_info=False)
                 fallback_res2, fallback_frames2 = self._fallback_params(resolution, frames, level=2)
                 logger.warning("Wan T2V OOM, retrying with fallback level 2 (640x352)", extra={"resolution": fallback_res2, "frames": fallback_frames2})
                 try:
@@ -302,6 +304,7 @@ class WanRunner(ModelRunner):
                     try:
                         video_frames = self._run_t2v_once(shot_prompt, negative_prompt, fallback_frames3, fallback_res3, seed)
                     except Exception as exc4:
+                        logger.warning("Wan T2V error, fallback level 3 failed: %s", exc4, exc_info=False)
                         raise RuntimeError("Wan T2V failed after OOM fallbacks (reduced resolution/frames).") from exc4
         materialized = self._materialize_frames_and_free_gpu(video_frames)
         self._write_video(materialized, fps=fps, out_path=out)
