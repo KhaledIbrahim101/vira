@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 import gc
 import logging
 import os
@@ -23,12 +22,12 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-class ModelRunner(ABC):
-    @abstractmethod
+class ModelRunner:
+    """Base for T2V runners; subclasses must override generate_video and generate_video_from_image."""
+
     def generate_video(self, shot_prompt: str, negative_prompt: str, duration: int, resolution: str, fps: int, seed: int) -> str:
         raise NotImplementedError
 
-    @abstractmethod
     def generate_video_from_image(self, ref_image: str, shot_prompt: str, negative_prompt: str, duration: int, resolution: str, fps: int, seed: int) -> str:
         raise NotImplementedError
 
