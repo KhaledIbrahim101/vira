@@ -3,9 +3,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import gc
 import logging
+import os
 from pathlib import Path
 import subprocess
 from typing import Any
+
+# Reduce CUDA fragmentation so OOM fallbacks have a chance to allocate (see PyTorch memory docs)
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 # Load ftfy before any Wan pipeline runs; tokenizer may reference it by name.
 try:
@@ -192,10 +196,25 @@ class WanRunner(ModelRunner):
         return (w // 16) * 16, (h // 16) * 16
 
     def _clear_gpu_memory(self):
-        """Free GPU cache and run GC. Avoid moving float16 pipeline to CPU (unsupported); just clear cache."""
+        """Free GPU cache and run GC."""
         if hasattr(self._torch.cuda, "empty_cache"):
             self._torch.cuda.empty_cache()
         gc.collect()
+
+    def _offload_pipeline_to_cpu_and_clear(self):
+        """Move cached pipeline to CPU and clear GPU so OOM fallbacks can allocate. No-op in safe mode (uses CPU offload)."""
+        if self.vram_mode == "safe":
+            self._clear_gpu_memory()
+            return
+        pipe = self._t2v
+        if pipe is None:
+            self._clear_gpu_memory()
+            return
+        try:
+            pipe.to("cpu")
+        except Exception as e:
+            logger.debug("Pipeline offload to CPU skipped: %s", e)
+        self._clear_gpu_memory()
 
     @staticmethod
     def _is_oom(exc: Exception) -> bool:
@@ -328,6 +347,8 @@ class WanRunner(ModelRunner):
         width, height = max(16, width), max(16, height)
         generator = self._torch.Generator(device=self.device).manual_seed(seed)
         pipe = self._get_t2v()
+        if self.vram_mode != "safe" and hasattr(pipe, "device") and str(pipe.device) != str(self.device):
+            pipe.to(self.device)
         kwargs = dict(
             prompt=shot_prompt,
             negative_prompt=negative_prompt,
@@ -350,6 +371,8 @@ class WanRunner(ModelRunner):
         width, height = max(16, width), max(16, height)
         generator = self._torch.Generator(device=self.device).manual_seed(seed)
         pipe = self._get_i2v()
+        if self.vram_mode != "safe" and hasattr(pipe, "device") and str(pipe.device) != str(self.device):
+            pipe.to(self.device)
         # Wan 1.3B is T2V-only (WanPipeline); I2V needs WanImageToVideoPipeline. Fall back to T2V if no image arg.
         kwargs_i2v = dict(
             prompt=shot_prompt,
@@ -395,7 +418,7 @@ class WanRunner(ModelRunner):
             if not self._is_oom(exc):
                 raise
             logger.warning("Wan T2V error (treating as OOM), first attempt: %s", exc, exc_info=False)
-            self._clear_gpu_memory()
+            self._offload_pipeline_to_cpu_and_clear()
             fallback_res, fallback_frames = self._fallback_params(resolution, frames, level=1)
             logger.warning("Wan T2V OOM, retrying with fallback (75%%)", extra={"resolution": fallback_res, "frames": fallback_frames})
             try:
@@ -404,7 +427,7 @@ class WanRunner(ModelRunner):
                 if not self._is_oom(exc2):
                     raise
                 logger.warning("Wan T2V error, fallback 75%% failed: %s", exc2, exc_info=False)
-                self._clear_gpu_memory()
+                self._offload_pipeline_to_cpu_and_clear()
                 fallback_res2, fallback_frames2 = self._fallback_params(resolution, frames, level=2)
                 logger.warning("Wan T2V OOM, retrying with fallback level 2 (640x352)", extra={"resolution": fallback_res2, "frames": fallback_frames2})
                 try:
@@ -413,7 +436,7 @@ class WanRunner(ModelRunner):
                     if not self._is_oom(exc3):
                         raise
                     logger.warning("Wan T2V error, fallback level 2 failed: %s", exc3, exc_info=False)
-                    self._clear_gpu_memory()
+                    self._offload_pipeline_to_cpu_and_clear()
                     fallback_res3, fallback_frames3 = self._fallback_params(resolution, frames, level=3)
                     logger.warning("Wan T2V OOM, retrying with fallback level 3 (512x320)", extra={"resolution": fallback_res3, "frames": fallback_frames3})
                     try:
@@ -438,7 +461,7 @@ class WanRunner(ModelRunner):
         except Exception as exc:
             if not self._is_oom(exc):
                 raise
-            self._clear_gpu_memory()
+            self._offload_pipeline_to_cpu_and_clear()
             fallback_res, fallback_frames = self._fallback_params(resolution, frames, level=1)
             logger.warning("Wan I2V OOM, retrying with fallback (75%%)", extra={"resolution": fallback_res, "frames": fallback_frames})
             try:
@@ -446,7 +469,7 @@ class WanRunner(ModelRunner):
             except Exception as exc2:
                 if not self._is_oom(exc2):
                     raise
-                self._clear_gpu_memory()
+                self._offload_pipeline_to_cpu_and_clear()
                 fallback_res2, fallback_frames2 = self._fallback_params(resolution, frames, level=2)
                 logger.warning("Wan I2V OOM, retrying with fallback level 2 (640x352)", extra={"resolution": fallback_res2, "frames": fallback_frames2})
                 try:
@@ -454,7 +477,7 @@ class WanRunner(ModelRunner):
                 except Exception as exc3:
                     if not self._is_oom(exc3):
                         raise
-                    self._clear_gpu_memory()
+                    self._offload_pipeline_to_cpu_and_clear()
                     fallback_res3, fallback_frames3 = self._fallback_params(resolution, frames, level=3)
                     logger.warning("Wan I2V OOM, retrying with fallback level 3 (512x320)", extra={"resolution": fallback_res3, "frames": fallback_frames3})
                     try:
