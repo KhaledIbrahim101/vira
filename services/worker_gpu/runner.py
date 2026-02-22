@@ -184,7 +184,13 @@ class WanRunner(ModelRunner):
         return (w // 16) * 16, (h // 16) * 16
 
     def _clear_gpu_memory(self):
-        """Free GPU cache and run GC so the next inference has room (e.g. after OOM or between shots)."""
+        """Move pipeline to CPU and free GPU cache so the next inference has room (e.g. after OOM or between shots)."""
+        pipe = getattr(self, "_t2v", None)
+        if pipe is not None and hasattr(pipe, "to"):
+            try:
+                pipe.to("cpu")
+            except Exception:
+                pass
         if hasattr(self._torch.cuda, "empty_cache"):
             self._torch.cuda.empty_cache()
         gc.collect()
