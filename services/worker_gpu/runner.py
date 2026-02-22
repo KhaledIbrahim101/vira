@@ -224,7 +224,8 @@ class WanRunner(ModelRunner):
             arr = self._np.asarray(frame)
         if arr.ndim == 3 and arr.shape[0] in (3, 4):
             arr = arr.transpose(1, 2, 0)
-        if arr.dtype in (self._np.float32, self._np.float64):
+        # Pipeline/VAE often return float16; only float32/64 were scaled before, so float16 was truncated to 0 -> gray
+        if self._np.issubdtype(arr.dtype, self._np.floating):
             arr = (arr.clip(0, 1) * 255).astype(self._np.uint8)
         elif arr.dtype != self._np.uint8:
             arr = arr.astype(self._np.uint8)
