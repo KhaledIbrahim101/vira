@@ -82,7 +82,7 @@ class WanRunner(ModelRunner):
         self._torch = self._import("torch")
         self._imageio = self._import("imageio")
         self._np = self._import("numpy")
-        self._PILImage = self._import("PIL.Image", attr="Image")
+        self._PILImage = self._import("PIL", attr="Image")  # PIL.Image class (has .open)
         # Use DiffusionPipeline so we work across diffusers versions (AutoPipelineForTextToVideo not in all releases)
         self._DiffusionPipeline = self._import("diffusers", attr="DiffusionPipeline")
 
