@@ -126,7 +126,15 @@ class WanRunner(ModelRunner):
                     "Wan tokenizer requires 'ftfy'. Install with: pip install ftfy"
                 )
             load_path = str(self._model_root)
-            pipe = self._DiffusionPipeline.from_pretrained(load_path, torch_dtype=self._dtype)
+            # Official README: load VAE in float32 for correct decoding (avoids gray/wrong output)
+            try:
+                AutoencoderKLWan = self._import("diffusers", attr="AutoencoderKLWan")
+                vae = AutoencoderKLWan.from_pretrained(load_path, subfolder="vae", torch_dtype=self._torch.float32)
+                pipe = self._DiffusionPipeline.from_pretrained(load_path, vae=vae, torch_dtype=self._dtype)
+                logger.info("Wan pipeline loaded with float32 VAE for decoding")
+            except Exception as vae_exc:
+                logger.warning("Could not load Wan VAE in float32, using default: %s", vae_exc)
+                pipe = self._DiffusionPipeline.from_pretrained(load_path, torch_dtype=self._dtype)
             # In safe mode use CPU offload so we never put the full model on GPU (avoids OOM on 16GB).
             if self.vram_mode == "safe" and hasattr(pipe, "enable_model_cpu_offload"):
                 self._apply_vram_mode(pipe)
@@ -301,6 +309,19 @@ class WanRunner(ModelRunner):
         if ret != 0:
             raise RuntimeError(f"ffmpeg exited with code {ret}")
 
+    def _write_pipeline_output_to_mp4(self, video_frames, fps: int, out_path: Path):
+        """Write pipeline output to MP4: try diffusers export_to_video (matches README), else materialize + ffmpeg."""
+        for mod_name in ("diffusers.utils", "diffusers.utils.export_utils"):
+            try:
+                export_to_video = self._import(mod_name, attr="export_to_video")
+                export_to_video(video_frames, str(out_path), fps=fps)
+                logger.info("Wrote video with diffusers export_to_video")
+                return
+            except Exception as e:
+                logger.debug("export_to_video from %s: %s", mod_name, e)
+        materialized = self._materialize_frames_and_free_gpu(video_frames)
+        self._write_video(materialized, fps=fps, out_path=out_path)
+
     def _run_t2v_once(self, shot_prompt: str, negative_prompt: str, frames: int, resolution: str, seed: int):
         width, height = self._parse_res(resolution)
         width, height = self._round_to_multiple_16(width, height)
@@ -315,6 +336,7 @@ class WanRunner(ModelRunner):
             height=height,
             num_inference_steps=self.num_inference_steps,
             generator=generator,
+            guidance_scale=5.0,
         )
         try:
             output = pipe(**kwargs, output_type="pil")
@@ -337,6 +359,7 @@ class WanRunner(ModelRunner):
             height=height,
             num_inference_steps=self.num_inference_steps,
             generator=generator,
+            guidance_scale=5.0,
         )
         try:
             image = self._PILImage.open(ref_image).convert("RGB").resize((width, height))
@@ -398,8 +421,7 @@ class WanRunner(ModelRunner):
                     except Exception as exc4:
                         logger.warning("Wan T2V error, fallback level 3 failed: %s", exc4, exc_info=False)
                         raise RuntimeError("Wan T2V failed after OOM fallbacks (reduced resolution/frames).") from exc4
-        materialized = self._materialize_frames_and_free_gpu(video_frames)
-        self._write_video(materialized, fps=fps, out_path=out)
+        self._write_pipeline_output_to_mp4(video_frames, fps=fps, out_path=out)
         return str(out)
 
     def generate_video_from_image(self, ref_image: str, shot_prompt: str, negative_prompt: str, duration: int, resolution: str, fps: int, seed: int) -> str:
@@ -439,6 +461,5 @@ class WanRunner(ModelRunner):
                         video_frames = self._run_i2v_once(ref_image, shot_prompt, negative_prompt, fallback_frames3, fallback_res3, seed)
                     except Exception as exc4:
                         raise RuntimeError("Wan I2V failed after OOM fallbacks (reduced resolution/frames).") from exc4
-        materialized = self._materialize_frames_and_free_gpu(video_frames)
-        self._write_video(materialized, fps=fps, out_path=out)
+        self._write_pipeline_output_to_mp4(video_frames, fps=fps, out_path=out)
         return str(out)
