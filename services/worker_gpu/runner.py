@@ -104,9 +104,6 @@ class WanRunner(ModelRunner):
         self._i2v: Any = None
         # When True, next _run_t2v_once/_run_i2v_once uses sequential CPU offload (for OOM fallback retries)
         self._use_sequential_offload_for_next_run = False
-        # Bind implementations to this instance so the correct methods are always used (avoids NotImplementedError in prefork/import edge cases)
-        self.generate_video = self._wan_generate_video
-        self.generate_video_from_image = self._wan_generate_video_from_image
 
     def _import(self, module_name: str, attr: str | None = None):
         try:
@@ -455,7 +452,7 @@ def _apply_gradient_checkpointing(pipe: Any) -> None:
                 raise
         return output.frames[0] if hasattr(output, "frames") else output[0]
 
-    def _wan_generate_video(self, shot_prompt: str, negative_prompt: str, duration: int, resolution: str, fps: int, seed: int) -> str:
+    def generate_video(self, shot_prompt: str, negative_prompt: str, duration: int, resolution: str, fps: int, seed: int) -> str:
         frames = max(8, duration * fps)
         # Wan: (num_frames - 1) divisible by 4
         frames = ((frames - 1) // 4) * 4 + 1
@@ -509,7 +506,7 @@ def _apply_gradient_checkpointing(pipe: Any) -> None:
                 pass
         return str(out)
 
-    def _wan_generate_video_from_image(self, ref_image: str, shot_prompt: str, negative_prompt: str, duration: int, resolution: str, fps: int, seed: int) -> str:
+    def generate_video_from_image(self, ref_image: str, shot_prompt: str, negative_prompt: str, duration: int, resolution: str, fps: int, seed: int) -> str:
         frames = max(8, duration * fps)
         frames = ((frames - 1) // 4) * 4 + 1
         frames = max(9, frames)

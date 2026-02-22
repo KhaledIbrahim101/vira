@@ -52,6 +52,12 @@ def _extract_last_frame(video_path: str, out_png: str) -> str:
 @celery_app.task(bind=True, name="services.worker_gpu.tasks.render_shot", max_retries=3)
 def render_shot(self, shot_id: str):
     runner = get_runner()
+    # Ensure WanRunner has real implementations (avoid NotImplementedError from stale image)
+    if isinstance(runner, WanRunner) and type(runner).generate_video is ModelRunner.generate_video:
+        raise RuntimeError(
+            "WanRunner loaded but generate_video is not overridden. "
+            "Rebuild the GPU worker image from the full codebase: docker build -f services/worker_gpu/Dockerfile.gpu -t vira-worker-gpu ."
+        )
     with SessionLocal() as db:
         shot = db.get(Shot, shot_id)
         if not shot:
