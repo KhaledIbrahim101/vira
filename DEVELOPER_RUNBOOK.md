@@ -536,4 +536,16 @@ Then start the worker again with the new model (e.g. 1.3B in `$WAN_WEIGHTS_DIR`)
 - `429 Rate limit exceeded`: increase `SUBMISSION_RATE_LIMIT_PER_MINUTE`.
 - WAN OOM: use `WAN_VRAM_MODE=safe`, lower duration/resolution, or more VRAM.
 - No Docker/NVIDIA runtime: use dummy backend first to validate full flow.
+- **GPU not doing any requests / Shot failed after retries**: If the real GPU worker runs on a **different machine**, do **not** run the `worker_gpu` service on the API host. The API host’s compose starts a `worker_gpu` container (no GPU) that consumes the `gpu` queue and fails when using Wan. On the API host, start only the API stack **without** worker_gpu so the GPU machine’s worker is the only one consuming the `gpu` queue. See “API host without GPU worker” below.
 - **Job stuck in POSTPROCESSING**: the postprocess worker (stitch/upscale/interpolate) is failing and retrying. Check `docker compose logs postprocess` for the error. If you see "minterpolate" or "No such filter", the code now falls back to a simpler fps filter; rebuild and restart the stack.
+
+### API host without GPU worker (when GPU runs on another machine)
+
+On the API host, start only these services so the `gpu` queue is consumed only by your GPU machine’s worker:
+
+```bash
+cd infra
+docker compose up -d postgres redis migrate api director postprocess
+```
+
+Do **not** run `docker compose up` without specifying services (that would start `worker_gpu` too). On the GPU machine, run the vira-worker-gpu container with `DATABASE_URL` and `REDIS_URL` pointing at the API host (see Step 9 in the GCP section or the `docker run` examples for the GPU worker).

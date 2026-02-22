@@ -1,7 +1,10 @@
+from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    model_config = ConfigDict(protected_namespaces=("settings_",), env_file=".env")
+
     database_url: str = "postgresql+psycopg://postgres:postgres@postgres:5432/vira"
     redis_url: str = "redis://redis:6379/0"
 
@@ -24,9 +27,6 @@ class Settings(BaseSettings):
     wan_vram_mode: str = "safe"  # safe | balanced | max | 24g | auto
     wan_try_full_resolution_first: bool = False  # when True, skip pre-cap; try requested res first (for 24GB+)
     wan_num_inference_steps: int = 25  # fewer steps = faster, less quality (default 50 in pipeline)
-
-    class Config:
-        env_file = ".env"
 
 
 settings = Settings()
