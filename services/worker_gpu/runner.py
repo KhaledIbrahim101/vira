@@ -157,7 +157,10 @@ class WanRunner(ModelRunner):
     def _apply_vram_mode(self, pipe: Any):
         mode = self.vram_mode
         if mode == "safe":
-            if hasattr(pipe, "enable_model_cpu_offload"):
+            # Sequential offload uses less peak VRAM than model_cpu_offload (one submodule at a time)
+            if hasattr(pipe, "enable_sequential_cpu_offload"):
+                pipe.enable_sequential_cpu_offload()
+            elif hasattr(pipe, "enable_model_cpu_offload"):
                 pipe.enable_model_cpu_offload()
             if hasattr(pipe, "enable_vae_slicing"):
                 pipe.enable_vae_slicing()
@@ -183,19 +186,21 @@ class WanRunner(ModelRunner):
         return "out of memory" in text or "cuda oom" in text or "cuda out of memory" in text
 
     def _fallback_params(self, resolution: str, frames: int, level: int = 1) -> tuple[str, int]:
-        """Return (resolution, frames) for OOM fallback. level 1 = 75%, level 2 = aggressive (fit 16GB T4)."""
+        """Return (resolution, frames) for OOM fallback. level 1=75%, 2=640x352, 3=512x320 min frames."""
         w, h = self._parse_res(resolution)
         if level == 1:
             w2 = max(640, int(w * 0.75))
             h2 = max(360, int(h * 0.75))
             f2 = max(8, int(frames * 0.75))
-        else:
-            # Level 2: aggressive for 16GB T4 with CPU offload (e.g. 640x352, cap frames)
-            w2, h2 = 640, 352  # 352 = 22*16
+        elif level == 2:
+            w2, h2 = 640, 352  # divisible by 16
             f2 = min(33, max(9, int(frames * 0.5)))
+        else:
+            # Level 3: minimum that still produces a short clip (512x320, 17 frames)
+            w2, h2 = 512, 320
+            f2 = min(17, max(9, int(frames * 0.25)))
         w2, h2 = self._round_to_multiple_16(w2, h2)
         w2, h2 = max(16, w2), max(16, h2)
-        # Ensure (num_frames - 1) divisible by 4 for Wan
         f2 = ((f2 - 1) // 4) * 4 + 1
         f2 = max(9, f2)
         return f"{w2}x{h2}", f2
@@ -264,11 +269,18 @@ class WanRunner(ModelRunner):
                 if not self._is_oom(exc2):
                     raise
                 fallback_res2, fallback_frames2 = self._fallback_params(resolution, frames, level=2)
-                logger.warning("Wan T2V OOM, retrying with aggressive fallback (640x360)", extra={"resolution": fallback_res2, "frames": fallback_frames2})
+                logger.warning("Wan T2V OOM, retrying with fallback level 2 (640x352)", extra={"resolution": fallback_res2, "frames": fallback_frames2})
                 try:
                     video_frames = self._run_t2v_once(shot_prompt, negative_prompt, fallback_frames2, fallback_res2, seed)
                 except Exception as exc3:
-                    raise RuntimeError("Wan T2V failed after OOM fallbacks (reduced resolution/frames).") from exc3
+                    if not self._is_oom(exc3):
+                        raise
+                    fallback_res3, fallback_frames3 = self._fallback_params(resolution, frames, level=3)
+                    logger.warning("Wan T2V OOM, retrying with fallback level 3 (512x320)", extra={"resolution": fallback_res3, "frames": fallback_frames3})
+                    try:
+                        video_frames = self._run_t2v_once(shot_prompt, negative_prompt, fallback_frames3, fallback_res3, seed)
+                    except Exception as exc4:
+                        raise RuntimeError("Wan T2V failed after OOM fallbacks (reduced resolution/frames).") from exc4
         self._write_video(video_frames, fps=fps, out_path=out)
         return str(out)
 
@@ -290,10 +302,17 @@ class WanRunner(ModelRunner):
                 if not self._is_oom(exc2):
                     raise
                 fallback_res2, fallback_frames2 = self._fallback_params(resolution, frames, level=2)
-                logger.warning("Wan I2V OOM, retrying with aggressive fallback (640x360)", extra={"resolution": fallback_res2, "frames": fallback_frames2})
+                logger.warning("Wan I2V OOM, retrying with fallback level 2 (640x352)", extra={"resolution": fallback_res2, "frames": fallback_frames2})
                 try:
                     video_frames = self._run_i2v_once(ref_image, shot_prompt, negative_prompt, fallback_frames2, fallback_res2, seed)
                 except Exception as exc3:
-                    raise RuntimeError("Wan I2V failed after OOM fallbacks (reduced resolution/frames).") from exc3
+                    if not self._is_oom(exc3):
+                        raise
+                    fallback_res3, fallback_frames3 = self._fallback_params(resolution, frames, level=3)
+                    logger.warning("Wan I2V OOM, retrying with fallback level 3 (512x320)", extra={"resolution": fallback_res3, "frames": fallback_frames3})
+                    try:
+                        video_frames = self._run_i2v_once(ref_image, shot_prompt, negative_prompt, fallback_frames3, fallback_res3, seed)
+                    except Exception as exc4:
+                        raise RuntimeError("Wan I2V failed after OOM fallbacks (reduced resolution/frames).") from exc4
         self._write_video(video_frames, fps=fps, out_path=out)
         return str(out)
