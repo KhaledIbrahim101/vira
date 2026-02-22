@@ -214,18 +214,25 @@ class WanRunner(ModelRunner):
         f2 = max(9, f2)
         return f"{w2}x{h2}", f2
 
+    def _frame_to_uint8_hwc(self, frame) -> Any:
+        """Convert pipeline frame to (H, W, C) uint8 0-255 for imageio. Handles PIL, tensor (C,H,W), numpy float."""
+        if hasattr(frame, "convert"):
+            frame = frame.convert("RGB")
+        if hasattr(frame, "cpu") and callable(getattr(frame, "cpu", None)):
+            arr = frame.cpu().numpy()
+        else:
+            arr = self._np.asarray(frame)
+        if arr.ndim == 3 and arr.shape[0] in (3, 4):
+            arr = arr.transpose(1, 2, 0)
+        if arr.dtype in (self._np.float32, self._np.float64):
+            arr = (arr.clip(0, 1) * 255).astype(self._np.uint8)
+        elif arr.dtype != self._np.uint8:
+            arr = arr.astype(self._np.uint8)
+        return arr
+
     def _materialize_frames_and_free_gpu(self, video_frames) -> list:
-        """Copy frames to CPU numpy and free GPU memory to avoid OOM when writing the video file."""
-        out = []
-        for frame in video_frames:
-            if hasattr(frame, "convert"):
-                frame = frame.convert("RGB")
-            if hasattr(frame, "cpu") and callable(getattr(frame, "cpu", None)):
-                arr = frame.cpu().numpy()
-            else:
-                arr = self._np.asarray(frame)
-            out.append(arr)
-        # Free GPU memory before writing (reduces peak RAM/VRAM and avoids SIGKILL after long runs)
+        """Copy frames to CPU numpy (H,W,C uint8) and free GPU memory to avoid OOM when writing the video file."""
+        out = [self._frame_to_uint8_hwc(f) for f in video_frames]
         if hasattr(self._torch.cuda, "empty_cache"):
             self._torch.cuda.empty_cache()
         gc.collect()
@@ -235,10 +242,8 @@ class WanRunner(ModelRunner):
         writer = self._imageio.get_writer(str(out_path), fps=fps)
         try:
             for frame in frames:
-                # frame may be PIL image or numpy array
-                if hasattr(frame, "convert"):
-                    frame = frame.convert("RGB")
-                writer.append_data(self._np.asarray(frame))
+                arr = self._frame_to_uint8_hwc(frame)
+                writer.append_data(arr)
         finally:
             writer.close()
 
