@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import gc
 import logging
 from pathlib import Path
 import subprocess
@@ -205,6 +206,23 @@ class WanRunner(ModelRunner):
         f2 = max(9, f2)
         return f"{w2}x{h2}", f2
 
+    def _materialize_frames_and_free_gpu(self, video_frames) -> list:
+        """Copy frames to CPU numpy and free GPU memory to avoid OOM when writing the video file."""
+        out = []
+        for frame in video_frames:
+            if hasattr(frame, "convert"):
+                frame = frame.convert("RGB")
+            if hasattr(frame, "cpu") and callable(getattr(frame, "cpu", None)):
+                arr = frame.cpu().numpy()
+            else:
+                arr = self._np.asarray(frame)
+            out.append(arr)
+        # Free GPU memory before writing (reduces peak RAM/VRAM and avoids SIGKILL after long runs)
+        if hasattr(self._torch.cuda, "empty_cache"):
+            self._torch.cuda.empty_cache()
+        gc.collect()
+        return out
+
     def _write_video(self, frames, fps: int, out_path: Path):
         writer = self._imageio.get_writer(str(out_path), fps=fps)
         try:
@@ -281,7 +299,8 @@ class WanRunner(ModelRunner):
                         video_frames = self._run_t2v_once(shot_prompt, negative_prompt, fallback_frames3, fallback_res3, seed)
                     except Exception as exc4:
                         raise RuntimeError("Wan T2V failed after OOM fallbacks (reduced resolution/frames).") from exc4
-        self._write_video(video_frames, fps=fps, out_path=out)
+        materialized = self._materialize_frames_and_free_gpu(video_frames)
+        self._write_video(materialized, fps=fps, out_path=out)
         return str(out)
 
     def generate_video_from_image(self, ref_image: str, shot_prompt: str, negative_prompt: str, duration: int, resolution: str, fps: int, seed: int) -> str:
@@ -314,5 +333,6 @@ class WanRunner(ModelRunner):
                         video_frames = self._run_i2v_once(ref_image, shot_prompt, negative_prompt, fallback_frames3, fallback_res3, seed)
                     except Exception as exc4:
                         raise RuntimeError("Wan I2V failed after OOM fallbacks (reduced resolution/frames).") from exc4
-        self._write_video(video_frames, fps=fps, out_path=out)
+        materialized = self._materialize_frames_and_free_gpu(video_frames)
+        self._write_video(materialized, fps=fps, out_path=out)
         return str(out)
