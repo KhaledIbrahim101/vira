@@ -183,6 +183,12 @@ class WanRunner(ModelRunner):
         """Wan requires width and height divisible by 16."""
         return (w // 16) * 16, (h // 16) * 16
 
+    def _clear_gpu_memory(self):
+        """Free GPU cache and run GC so the next inference has room (e.g. after OOM or between shots)."""
+        if hasattr(self._torch.cuda, "empty_cache"):
+            self._torch.cuda.empty_cache()
+        gc.collect()
+
     @staticmethod
     def _is_oom(exc: Exception) -> bool:
         text = str(exc).lower()
@@ -278,12 +284,14 @@ class WanRunner(ModelRunner):
         frames = ((frames - 1) // 4) * 4 + 1
         frames = max(9, frames)
         out = self.output_root / f"wan_t2v_{seed}.mp4"
+        self._clear_gpu_memory()
         try:
             video_frames = self._run_t2v_once(shot_prompt, negative_prompt, frames, resolution, seed)
         except Exception as exc:
             if not self._is_oom(exc):
                 raise
             logger.warning("Wan T2V error (treating as OOM), first attempt: %s", exc, exc_info=False)
+            self._clear_gpu_memory()
             fallback_res, fallback_frames = self._fallback_params(resolution, frames, level=1)
             logger.warning("Wan T2V OOM, retrying with fallback (75%%)", extra={"resolution": fallback_res, "frames": fallback_frames})
             try:
@@ -292,6 +300,7 @@ class WanRunner(ModelRunner):
                 if not self._is_oom(exc2):
                     raise
                 logger.warning("Wan T2V error, fallback 75%% failed: %s", exc2, exc_info=False)
+                self._clear_gpu_memory()
                 fallback_res2, fallback_frames2 = self._fallback_params(resolution, frames, level=2)
                 logger.warning("Wan T2V OOM, retrying with fallback level 2 (640x352)", extra={"resolution": fallback_res2, "frames": fallback_frames2})
                 try:
@@ -299,6 +308,8 @@ class WanRunner(ModelRunner):
                 except Exception as exc3:
                     if not self._is_oom(exc3):
                         raise
+                    logger.warning("Wan T2V error, fallback level 2 failed: %s", exc3, exc_info=False)
+                    self._clear_gpu_memory()
                     fallback_res3, fallback_frames3 = self._fallback_params(resolution, frames, level=3)
                     logger.warning("Wan T2V OOM, retrying with fallback level 3 (512x320)", extra={"resolution": fallback_res3, "frames": fallback_frames3})
                     try:
@@ -315,11 +326,13 @@ class WanRunner(ModelRunner):
         frames = ((frames - 1) // 4) * 4 + 1
         frames = max(9, frames)
         out = self.output_root / f"wan_i2v_{seed}.mp4"
+        self._clear_gpu_memory()
         try:
             video_frames = self._run_i2v_once(ref_image, shot_prompt, negative_prompt, frames, resolution, seed)
         except Exception as exc:
             if not self._is_oom(exc):
                 raise
+            self._clear_gpu_memory()
             fallback_res, fallback_frames = self._fallback_params(resolution, frames, level=1)
             logger.warning("Wan I2V OOM, retrying with fallback (75%%)", extra={"resolution": fallback_res, "frames": fallback_frames})
             try:
@@ -327,6 +340,7 @@ class WanRunner(ModelRunner):
             except Exception as exc2:
                 if not self._is_oom(exc2):
                     raise
+                self._clear_gpu_memory()
                 fallback_res2, fallback_frames2 = self._fallback_params(resolution, frames, level=2)
                 logger.warning("Wan I2V OOM, retrying with fallback level 2 (640x352)", extra={"resolution": fallback_res2, "frames": fallback_frames2})
                 try:
@@ -334,6 +348,7 @@ class WanRunner(ModelRunner):
                 except Exception as exc3:
                     if not self._is_oom(exc3):
                         raise
+                    self._clear_gpu_memory()
                     fallback_res3, fallback_frames3 = self._fallback_params(resolution, frames, level=3)
                     logger.warning("Wan I2V OOM, retrying with fallback level 3 (512x320)", extra={"resolution": fallback_res3, "frames": fallback_frames3})
                     try:
