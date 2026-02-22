@@ -228,8 +228,8 @@ class WanRunner(ModelRunner):
             return list(video_frames)
         return [video_frames]
 
-    def _frame_to_uint8_hwc(self, frame) -> Any:
-        """Convert pipeline frame to (H, W, C) uint8 0-255 for imageio. Handles PIL, tensor (C,H,W), numpy float."""
+    def _frame_to_float_hwc(self, frame) -> Any:
+        """Convert pipeline frame to (H, W, C) float in [0,1] (or [-1,1] mapped to [0,1]). Handles PIL, tensor, numpy."""
         if hasattr(frame, "convert"):
             frame = frame.convert("RGB")
         if hasattr(frame, "cpu") and callable(getattr(frame, "cpu", None)):
@@ -239,41 +239,65 @@ class WanRunner(ModelRunner):
         if arr.ndim == 3 and arr.shape[0] in (3, 4):
             arr = arr.transpose(1, 2, 0)
         if self._np.issubdtype(arr.dtype, self._np.floating):
-            low, high = float(arr.min()), float(arr.max())
-            if low < -0.1:
+            if float(arr.min()) < -0.1:
                 arr = ((arr + 1.0) * 0.5).clip(0, 1)
             else:
                 arr = arr.clip(0, 1)
-            arr = (arr * 255).astype(self._np.uint8)
-        elif arr.dtype != self._np.uint8:
-            arr = arr.astype(self._np.uint8)
-        return arr
+        return arr.astype(self._np.float32) if arr.dtype != self._np.float32 else arr
 
     def _materialize_frames_and_free_gpu(self, video_frames) -> list:
-        """Copy frames to CPU numpy (H,W,C uint8) and free GPU memory to avoid OOM when writing the video file."""
+        """Copy frames to CPU numpy (H,W,C uint8) with contrast normalized to full 0-255. Frees GPU before return."""
         video_frames = self._frames_to_list(video_frames)
-        if video_frames:
-            f0 = video_frames[0]
-            a0 = f0.cpu().numpy() if hasattr(f0, "cpu") else self._np.asarray(f0)
-            logger.info(
-                "Wan pipeline frames: count=%s first_frame shape=%s dtype=%s min=%.4f max=%.4f",
-                len(video_frames), getattr(a0, "shape", None), getattr(a0, "dtype", None),
-                float(self._np.min(a0)), float(self._np.max(a0)),
-            )
-        out = [self._frame_to_uint8_hwc(f) for f in video_frames]
+        if not video_frames:
+            if hasattr(self._torch.cuda, "empty_cache"):
+                self._torch.cuda.empty_cache()
+            gc.collect()
+            return []
+        # Convert to float [0,1] and compute global min/max so we use full 0-255 range (fixes dim/gray output)
+        float_frames = [self._frame_to_float_hwc(f) for f in video_frames]
+        f0 = float_frames[0]
+        gmin, gmax = float(self._np.min(f0)), float(self._np.max(f0))
+        for a in float_frames[1:]:
+            gmin = min(gmin, float(self._np.min(a)))
+            gmax = max(gmax, float(self._np.max(a)))
+        logger.info(
+            "Wan pipeline frames: count=%s first_frame shape=%s dtype=float32 global_min=%.4f global_max=%.4f",
+            len(float_frames), getattr(f0, "shape", None), gmin, gmax,
+        )
+        span = max(gmax - gmin, 1e-6)
+        out = [((a - gmin) / span * 255).clip(0, 255).astype(self._np.uint8) for a in float_frames]
         if hasattr(self._torch.cuda, "empty_cache"):
             self._torch.cuda.empty_cache()
         gc.collect()
         return out
 
     def _write_video(self, frames, fps: int, out_path: Path):
-        writer = self._imageio.get_writer(str(out_path), fps=fps)
+        """Write (H,W,C) uint8 frames to MP4 via ffmpeg for correct duration and player compatibility."""
+        if not frames:
+            raise ValueError("No frames to write")
+        h, w = frames[0].shape[0], frames[0].shape[1]
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(fps),
+            "-i", "pipe:0",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            str(out_path),
+        ]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         try:
-            for frame in frames:
-                arr = self._frame_to_uint8_hwc(frame)
-                writer.append_data(arr)
+            for arr in frames:
+                if arr.shape[0] != h or arr.shape[1] != w or arr.ndim != 3:
+                    arr = self._np.asarray(arr)
+                    if arr.ndim == 3 and arr.shape[0] in (3, 4):
+                        arr = arr.transpose(1, 2, 0)
+                    if arr.shape[0] != h or arr.shape[1] != w:
+                        raise ValueError(f"Frame shape {arr.shape} != {h}x{w}")
+                proc.stdin.write(arr.tobytes())
         finally:
-            writer.close()
+            proc.stdin.close()
+        ret = proc.wait()
+        if ret != 0:
+            raise RuntimeError(f"ffmpeg exited with code {ret}")
 
     def _run_t2v_once(self, shot_prompt: str, negative_prompt: str, frames: int, resolution: str, seed: int):
         width, height = self._parse_res(resolution)
