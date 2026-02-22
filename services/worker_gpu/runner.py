@@ -229,7 +229,7 @@ class WanRunner(ModelRunner):
         return [video_frames]
 
     def _frame_to_float_hwc(self, frame) -> Any:
-        """Convert pipeline frame to (H, W, C) float in [0,1] (or [-1,1] mapped to [0,1]). Handles PIL, tensor, numpy."""
+        """Convert pipeline frame to (H, W, C) float in [0,1]. Handles PIL (output_type=pil), tensor, numpy."""
         if hasattr(frame, "convert"):
             frame = frame.convert("RGB")
         if hasattr(frame, "cpu") and callable(getattr(frame, "cpu", None)):
@@ -243,7 +243,9 @@ class WanRunner(ModelRunner):
                 arr = ((arr + 1.0) * 0.5).clip(0, 1)
             else:
                 arr = arr.clip(0, 1)
-        return arr.astype(self._np.float32) if arr.dtype != self._np.float32 else arr
+            return arr.astype(self._np.float32) if arr.dtype != self._np.float32 else arr
+        # PIL/numpy uint8: 0-255 -> 0-1
+        return (arr.astype(self._np.float32) / 255.0).clip(0, 1)
 
     def _materialize_frames_and_free_gpu(self, video_frames) -> list:
         """Copy frames to CPU numpy (H,W,C uint8) with contrast normalized to full 0-255. Frees GPU before return."""
@@ -292,7 +294,7 @@ class WanRunner(ModelRunner):
                         arr = arr.transpose(1, 2, 0)
                     if arr.shape[0] != h or arr.shape[1] != w:
                         raise ValueError(f"Frame shape {arr.shape} != {h}x{w}")
-                proc.stdin.write(arr.tobytes())
+                proc.stdin.write(self._np.ascontiguousarray(arr).tobytes())
         finally:
             proc.stdin.close()
         ret = proc.wait()
@@ -305,7 +307,7 @@ class WanRunner(ModelRunner):
         width, height = max(16, width), max(16, height)
         generator = self._torch.Generator(device=self.device).manual_seed(seed)
         pipe = self._get_t2v()
-        output = pipe(
+        kwargs = dict(
             prompt=shot_prompt,
             negative_prompt=negative_prompt,
             num_frames=frames,
@@ -314,6 +316,10 @@ class WanRunner(ModelRunner):
             num_inference_steps=self.num_inference_steps,
             generator=generator,
         )
+        try:
+            output = pipe(**kwargs, output_type="pil")
+        except TypeError:
+            output = pipe(**kwargs)
         return output.frames[0] if hasattr(output, "frames") else output[0]
 
     def _run_i2v_once(self, ref_image: str, shot_prompt: str, negative_prompt: str, frames: int, resolution: str, seed: int):
@@ -323,30 +329,28 @@ class WanRunner(ModelRunner):
         generator = self._torch.Generator(device=self.device).manual_seed(seed)
         pipe = self._get_i2v()
         # Wan 1.3B is T2V-only (WanPipeline); I2V needs WanImageToVideoPipeline. Fall back to T2V if no image arg.
+        kwargs_i2v = dict(
+            prompt=shot_prompt,
+            negative_prompt=negative_prompt,
+            num_frames=frames,
+            width=width,
+            height=height,
+            num_inference_steps=self.num_inference_steps,
+            generator=generator,
+        )
         try:
             image = self._PILImage.open(ref_image).convert("RGB").resize((width, height))
-            output = pipe(
-                image=image,
-                prompt=shot_prompt,
-                negative_prompt=negative_prompt,
-                num_frames=frames,
-                width=width,
-                height=height,
-                num_inference_steps=self.num_inference_steps,
-                generator=generator,
-            )
+            try:
+                output = pipe(image=image, **kwargs_i2v, output_type="pil")
+            except TypeError:
+                output = pipe(image=image, **kwargs_i2v)
         except TypeError as e:
             if "unexpected keyword argument 'image'" in str(e) or "unexpected keyword argument" in str(e):
                 logger.info("Pipeline does not support image input (T2V-only), using prompt only for I2V shot")
-                output = pipe(
-                    prompt=shot_prompt,
-                    negative_prompt=negative_prompt,
-                    num_frames=frames,
-                    width=width,
-                    height=height,
-                    num_inference_steps=self.num_inference_steps,
-                    generator=generator,
-                )
+                try:
+                    output = pipe(**kwargs_i2v, output_type="pil")
+                except TypeError:
+                    output = pipe(**kwargs_i2v)
             else:
                 raise
         return output.frames[0] if hasattr(output, "frames") else output[0]
