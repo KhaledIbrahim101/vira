@@ -173,6 +173,11 @@ class WanRunner(ModelRunner):
         return int(w), int(h)
 
     @staticmethod
+    def _round_to_multiple_16(w: int, h: int) -> tuple[int, int]:
+        """Wan requires width and height divisible by 16."""
+        return (w // 16) * 16, (h // 16) * 16
+
+    @staticmethod
     def _is_oom(exc: Exception) -> bool:
         text = str(exc).lower()
         return "out of memory" in text or "cuda oom" in text or "cuda out of memory" in text
@@ -185,9 +190,11 @@ class WanRunner(ModelRunner):
             h2 = max(360, int(h * 0.75))
             f2 = max(8, int(frames * 0.75))
         else:
-            # Level 2: aggressive for 16GB T4 with CPU offload (e.g. 640x360, cap frames)
-            w2, h2 = 640, 360
-            f2 = min(33, max(9, int(frames * 0.5)))  # (num_frames-1) divisible by 4 -> 9, 13, 17, ...
+            # Level 2: aggressive for 16GB T4 with CPU offload (e.g. 640x352, cap frames)
+            w2, h2 = 640, 352  # 352 = 22*16
+            f2 = min(33, max(9, int(frames * 0.5)))
+        w2, h2 = self._round_to_multiple_16(w2, h2)
+        w2, h2 = max(16, w2), max(16, h2)
         # Ensure (num_frames - 1) divisible by 4 for Wan
         f2 = ((f2 - 1) // 4) * 4 + 1
         f2 = max(9, f2)
@@ -206,6 +213,8 @@ class WanRunner(ModelRunner):
 
     def _run_t2v_once(self, shot_prompt: str, negative_prompt: str, frames: int, resolution: str, seed: int):
         width, height = self._parse_res(resolution)
+        width, height = self._round_to_multiple_16(width, height)
+        width, height = max(16, width), max(16, height)
         generator = self._torch.Generator(device=self.device).manual_seed(seed)
         pipe = self._get_t2v()
         output = pipe(
@@ -220,6 +229,8 @@ class WanRunner(ModelRunner):
 
     def _run_i2v_once(self, ref_image: str, shot_prompt: str, negative_prompt: str, frames: int, resolution: str, seed: int):
         width, height = self._parse_res(resolution)
+        width, height = self._round_to_multiple_16(width, height)
+        width, height = max(16, width), max(16, height)
         generator = self._torch.Generator(device=self.device).manual_seed(seed)
         image = self._PILImage.open(ref_image).convert("RGB").resize((width, height))
         pipe = self._get_i2v()
