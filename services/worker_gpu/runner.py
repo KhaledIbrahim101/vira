@@ -214,6 +214,20 @@ class WanRunner(ModelRunner):
         f2 = max(9, f2)
         return f"{w2}x{h2}", f2
 
+    def _frames_to_list(self, video_frames) -> list:
+        """Normalize pipeline output to a list of 3D frames (each C,H,W or H,W,C). Handles 5D/4D tensors and lists."""
+        if hasattr(video_frames, "shape"):
+            arr = video_frames.cpu().numpy() if hasattr(video_frames, "cpu") else self._np.asarray(video_frames)
+            nd = arr.ndim
+            if nd == 5:
+                arr = arr[0]
+                nd = 4
+            if nd == 4:
+                return [arr[i] for i in range(arr.shape[0])]
+        if isinstance(video_frames, (list, tuple)):
+            return list(video_frames)
+        return [video_frames]
+
     def _frame_to_uint8_hwc(self, frame) -> Any:
         """Convert pipeline frame to (H, W, C) uint8 0-255 for imageio. Handles PIL, tensor (C,H,W), numpy float."""
         if hasattr(frame, "convert"):
@@ -224,15 +238,28 @@ class WanRunner(ModelRunner):
             arr = self._np.asarray(frame)
         if arr.ndim == 3 and arr.shape[0] in (3, 4):
             arr = arr.transpose(1, 2, 0)
-        # Pipeline/VAE often return float16; only float32/64 were scaled before, so float16 was truncated to 0 -> gray
         if self._np.issubdtype(arr.dtype, self._np.floating):
-            arr = (arr.clip(0, 1) * 255).astype(self._np.uint8)
+            low, high = float(arr.min()), float(arr.max())
+            if low < -0.1:
+                arr = ((arr + 1.0) * 0.5).clip(0, 1)
+            else:
+                arr = arr.clip(0, 1)
+            arr = (arr * 255).astype(self._np.uint8)
         elif arr.dtype != self._np.uint8:
             arr = arr.astype(self._np.uint8)
         return arr
 
     def _materialize_frames_and_free_gpu(self, video_frames) -> list:
         """Copy frames to CPU numpy (H,W,C uint8) and free GPU memory to avoid OOM when writing the video file."""
+        video_frames = self._frames_to_list(video_frames)
+        if video_frames:
+            f0 = video_frames[0]
+            a0 = f0.cpu().numpy() if hasattr(f0, "cpu") else self._np.asarray(f0)
+            logger.info(
+                "Wan pipeline frames: count=%s first_frame shape=%s dtype=%s min=%.4f max=%.4f",
+                len(video_frames), getattr(a0, "shape", None), getattr(a0, "dtype", None),
+                float(self._np.min(a0)), float(self._np.max(a0)),
+            )
         out = [self._frame_to_uint8_hwc(f) for f in video_frames]
         if hasattr(self._torch.cuda, "empty_cache"):
             self._torch.cuda.empty_cache()
