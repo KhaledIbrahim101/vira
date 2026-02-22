@@ -54,7 +54,7 @@ curl -X POST http://localhost:8000/jobs \
 Single-line (copy-paste friendly on Windows/MINGW):
 
 ```bash
-curl -X POST http://localhost:8000/jobs -H "content-type: application/json" -d "{\"prompt\":\"cinematic anime swordswoman under moonlight\",\"duration_sec\":12,\"aspect_ratio\":\"16:9\",\"postprocess\":{\"upscale_enabled\":true,\"interpolation_enabled\":true,\"denoise_enabled\":false,\"target_resolution\":\"1920x1080\",\"target_fps\":30}}"
+curl -X POST http://localhost:8000/jobs -H "content-type: application/json" -d "{\"prompt\":\"cinematic anime swordswoman under moonlight\",\"duration_sec\":10,\"aspect_ratio\":\"16:9\",\"postprocess\":{\"upscale_enabled\":true,\"interpolation_enabled\":true,\"denoise_enabled\":false,\"target_resolution\":\"1920x1080\",\"target_fps\":30}}"
 ```
 
 Copy the returned `job_id`, then:

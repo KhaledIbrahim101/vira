@@ -68,12 +68,14 @@ class WanRunner(ModelRunner):
         device: str = "cuda",
         dtype: str = "float16",
         vram_mode: str = "safe",
+        num_inference_steps: int = 25,
         output_root: str = "/tmp/vira",
     ):
         self.model_path = model_path
         self.device = device
         self.dtype = dtype
         self.vram_mode = vram_mode
+        self.num_inference_steps = num_inference_steps
         self.output_root = Path(output_root)
         self.output_root.mkdir(parents=True, exist_ok=True)
 
@@ -246,6 +248,7 @@ class WanRunner(ModelRunner):
             num_frames=frames,
             width=width,
             height=height,
+            num_inference_steps=self.num_inference_steps,
             generator=generator,
         )
         return output.frames[0] if hasattr(output, "frames") else output[0]
@@ -264,6 +267,7 @@ class WanRunner(ModelRunner):
             num_frames=frames,
             width=width,
             height=height,
+            num_inference_steps=self.num_inference_steps,
             generator=generator,
         )
         return output.frames[0] if hasattr(output, "frames") else output[0]

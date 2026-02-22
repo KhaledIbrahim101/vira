@@ -27,6 +27,7 @@ def get_runner() -> ModelRunner:
             device=settings.wan_device,
             dtype=settings.wan_dtype,
             vram_mode=settings.wan_vram_mode,
+            num_inference_steps=settings.wan_num_inference_steps,
         )
     else:
         _runner = DummyRunner()

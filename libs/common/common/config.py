@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     wan_device: str = "cuda"
     wan_dtype: str = "float16"  # float16 | bfloat16 | float32
     wan_vram_mode: str = "safe"  # safe | balanced | max
+    wan_num_inference_steps: int = 25  # fewer steps = faster, less quality (default 50 in pipeline)
 
     class Config:
         env_file = ".env"
