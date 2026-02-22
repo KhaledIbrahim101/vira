@@ -264,18 +264,34 @@ class WanRunner(ModelRunner):
         width, height = self._round_to_multiple_16(width, height)
         width, height = max(16, width), max(16, height)
         generator = self._torch.Generator(device=self.device).manual_seed(seed)
-        image = self._PILImage.open(ref_image).convert("RGB").resize((width, height))
         pipe = self._get_i2v()
-        output = pipe(
-            image=image,
-            prompt=shot_prompt,
-            negative_prompt=negative_prompt,
-            num_frames=frames,
-            width=width,
-            height=height,
-            num_inference_steps=self.num_inference_steps,
-            generator=generator,
-        )
+        # Wan 1.3B is T2V-only (WanPipeline); I2V needs WanImageToVideoPipeline. Fall back to T2V if no image arg.
+        try:
+            image = self._PILImage.open(ref_image).convert("RGB").resize((width, height))
+            output = pipe(
+                image=image,
+                prompt=shot_prompt,
+                negative_prompt=negative_prompt,
+                num_frames=frames,
+                width=width,
+                height=height,
+                num_inference_steps=self.num_inference_steps,
+                generator=generator,
+            )
+        except TypeError as e:
+            if "unexpected keyword argument 'image'" in str(e) or "unexpected keyword argument" in str(e):
+                logger.info("Pipeline does not support image input (T2V-only), using prompt only for I2V shot")
+                output = pipe(
+                    prompt=shot_prompt,
+                    negative_prompt=negative_prompt,
+                    num_frames=frames,
+                    width=width,
+                    height=height,
+                    num_inference_steps=self.num_inference_steps,
+                    generator=generator,
+                )
+            else:
+                raise
         return output.frames[0] if hasattr(output, "frames") else output[0]
 
     def generate_video(self, shot_prompt: str, negative_prompt: str, duration: int, resolution: str, fps: int, seed: int) -> str:
