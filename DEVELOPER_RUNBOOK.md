@@ -434,9 +434,13 @@ curl -L http://34.177.93.19:8000/jobs/8b825cb6-d7f0-4b9b-9682-639f8f2194b7/resul
    - **Default for small GPUs (e.g. T4 16GB):** use **Wan2.1-T2V-1.3B-Diffusers** (`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`) to avoid OOM; the 14B model requires a larger VM (e.g. 24GB+ VRAM).
 
 3. **Build the GPU worker image**
-   ```bash
-   docker build -f services/worker_gpu/Dockerfile.gpu -t vira-worker-gpu .
-   ```
+   - **Run the build from the repo root** so `COPY . .` gets the full tree (including `services/worker_gpu/runner.py` with WanRunner methods). Example:
+     ```bash
+     cd /path/to/vira
+     docker build --no-cache -f services/worker_gpu/Dockerfile.gpu -t vira-worker-gpu .
+     ```
+   - If you build on one machine and run the worker on another (e.g. GPU VM), **push this image to your registry and pull it on the worker host**; otherwise the worker may be running an older image built elsewhere.
+   - To confirm the image has the right code: `docker run --rm vira-worker-gpu grep -c "def generate_video" /app/services/worker_gpu/runner.py` — it should print **3**. If it prints 2, the image is stale; rebuild from repo root with `--no-cache`.
 
 4. **Run the GPU worker**
    - The worker must use the **same** Redis and Postgres as your API (same `REDIS_URL`, `DATABASE_URL`) so jobs flow correctly.
@@ -537,6 +541,7 @@ Then start the worker again with the new model (e.g. 1.3B in `$WAN_WEIGHTS_DIR`)
 - WAN OOM: use `WAN_VRAM_MODE=safe`, lower duration/resolution, or more VRAM.
 - No Docker/NVIDIA runtime: use dummy backend first to validate full flow.
 - **GPU not doing any requests / Shot failed after retries**: If the real GPU worker runs on a **different machine**, do **not** run the `worker_gpu` service on the API host. The API host’s compose starts a `worker_gpu` container (no GPU) that consumes the `gpu` queue and fails when using Wan. On the API host, start only the API stack **without** worker_gpu so the GPU machine’s worker is the only one consuming the `gpu` queue. See “API host without GPU worker” below.
+- **“WanRunner loaded but generate_video is not overridden (stale image)”**: The worker is running an image that doesn’t contain the full `runner.py` (WanRunner methods). **Build from repo root** so `COPY . .` gets the full tree: `cd /path/to/vira && docker build --no-cache -f services/worker_gpu/Dockerfile.gpu -t vira-worker-gpu .` If the worker runs on a **different machine** than where you build, **push this image to your registry and pull it on the worker host** — the worker must use the image you just built, not an older image from the registry. Verify the image: `docker run --rm vira-worker-gpu grep -c "def generate_video" /app/services/worker_gpu/runner.py` should print **3**.
 - **Job stuck in POSTPROCESSING**: the postprocess worker (stitch/upscale/interpolate) is failing and retrying. Check `docker compose logs postprocess` for the error. If you see "minterpolate" or "No such filter", the code now falls back to a simpler fps filter; rebuild and restart the stack.
 
 ### API host without GPU worker (when GPU runs on another machine)

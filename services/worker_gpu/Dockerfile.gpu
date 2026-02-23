@@ -11,9 +11,13 @@ RUN python3 -m pip install --no-cache-dir -U pip && \
     python3 -m pip install --no-cache-dir -r requirements-gpu.txt
 
 # ARG invalidates cache when CACHEBUST changes. To force fresh app code: --build-arg CACHEBUST=$(date +%s). Or use: docker build --no-cache ...
+# IMPORTANT: Run build from repo root so COPY . . gets full tree: cd /path/to/vira && docker build ...
 ARG CACHEBUST=1
 COPY . .
 ENV PYTHONPATH=/app/libs/common:/app
+
+# Fail build if runner.py is incomplete (wrong build context or stale cache)
+RUN grep -q "wan_t2v_.*mp4" /app/services/worker_gpu/runner.py && grep -q "wan_i2v_.*mp4" /app/services/worker_gpu/runner.py || (echo "ERROR: services/worker_gpu/runner.py missing WanRunner methods. Build from repo root: cd /path/to/vira && docker build --no-cache -f services/worker_gpu/Dockerfile.gpu -t vira-worker-gpu ." && exit 1)
 
 # Weights are NOT copied into image. Mount via volume, e.g.:
 #   - /path/to/wan2-weights:/models/wan2:ro
