@@ -55,8 +55,9 @@ def render_shot(self, shot_id: str):
     # Ensure WanRunner has real implementations (avoid NotImplementedError from stale image)
     if isinstance(runner, WanRunner) and type(runner).generate_video is ModelRunner.generate_video:
         raise RuntimeError(
-            "WanRunner loaded but generate_video is not overridden. "
-            "Rebuild the GPU worker image from the full codebase: docker build -f services/worker_gpu/Dockerfile.gpu -t vira-worker-gpu ."
+            "WanRunner loaded but generate_video is not overridden (stale image). "
+            "Rebuild without cache so COPY gets latest code: "
+            "docker build --no-cache -f services/worker_gpu/Dockerfile.gpu -t vira-worker-gpu ."
         )
     with SessionLocal() as db:
         shot = db.get(Shot, shot_id)

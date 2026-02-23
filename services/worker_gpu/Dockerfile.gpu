@@ -10,6 +10,8 @@ COPY requirements.txt requirements-gpu.txt ./
 RUN python3 -m pip install --no-cache-dir -U pip && \
     python3 -m pip install --no-cache-dir -r requirements-gpu.txt
 
+# ARG invalidates cache when CACHEBUST changes. To force fresh app code: --build-arg CACHEBUST=$(date +%s). Or use: docker build --no-cache ...
+ARG CACHEBUST=1
 COPY . .
 ENV PYTHONPATH=/app/libs/common:/app
 
